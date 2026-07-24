@@ -168,6 +168,22 @@ func TestBuildGraphExtractsSignatureAndDoc(t *testing.T) {
 	}
 }
 
+func TestBuildGraphComputesFan(t *testing.T) {
+	g := buildFixture(t, "sigmod")
+	fan := map[string][2]int{} // symbol -> {fanIn, fanOut}
+	for _, n := range g.Nodes {
+		fan[n.Symbol] = [2]int{n.FanIn, n.FanOut}
+	}
+	// main calls Add and sq (sq twice, deduped to one edge) -> fanOut 2, fanIn 0.
+	if fan["main"] != [2]int{0, 2} {
+		t.Errorf("main fan = %v, want {0,2}", fan["main"])
+	}
+	// Add is called once by main, calls nothing -> fanIn 1, fanOut 0.
+	if fan["Add"] != [2]int{1, 0} {
+		t.Errorf("Add fan = %v, want {1,0}", fan["Add"])
+	}
+}
+
 func hasStaticEdge(g contract.Graph, from, to int) bool {
 	for _, e := range g.Edges {
 		if e.From == from && e.To == to && e.Kind == "static" {

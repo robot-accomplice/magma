@@ -99,6 +99,7 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta, progress Progress) 
 	nodes, posnID := collectNodes(repo, modPath, withTests.prog, withTests.initial, reachAll, reachProd, withTests.mains)
 	step("collecting edges")
 	edges := collectEdges(repo, withTests.prog, resAll.CallGraph, posnID)
+	assignFan(nodes, edges)
 
 	g.Nodes = nodes
 	g.Edges = edges
@@ -296,6 +297,22 @@ func collectEdges(repo string, prog *ssa.Program, cg *callgraph.Graph, posnID ma
 		edges = append(edges, *e)
 	}
 	return edges
+}
+
+// assignFan sets each node's FanIn/FanOut from the deduped edge set: FanOut is
+// the number of distinct callees, FanIn the number of distinct callers. Edges
+// are already deduped per (from,to) by collectEdges, so a plain tally suffices.
+func assignFan(nodes []contract.Node, edges []contract.Edge) {
+	in := make(map[int]int, len(nodes))
+	out := make(map[int]int, len(nodes))
+	for _, e := range edges {
+		out[e.From]++
+		in[e.To]++
+	}
+	for i := range nodes {
+		nodes[i].FanIn = in[nodes[i].ID]
+		nodes[i].FanOut = out[nodes[i].ID]
+	}
 }
 
 // prettyName renders a function/method name without go/ssa's punctuation, e.g.
