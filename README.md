@@ -102,6 +102,22 @@ Regenerating a map **reconciles** the notes: any markdown file the previous run 
 the new render no longer lists (a function that was deleted, say) is removed. A note you
 wrote by hand, that magma never generated, is never touched.
 
+### Viewing one project's graph in Obsidian
+
+A vault usually holds several maps (and your own notes) in one graph view — so the global
+graph is a hairball of everything at once. Every note magma writes carries a per-project tag,
+`#magma/project/<folder-name>`, so you can isolate a single project:
+
+- **Its call graph.** Open the graph view (⌘/Ctrl-G) and type `tag:#magma/project/<folder-name>`
+  into the graph filter (or `path:"<folder-name>/nodes"`). Only that project's function notes and
+  their call edges remain.
+- **Its note list.** Click the `#magma/project/<folder-name>` tag anywhere (it's rendered live at
+  the top of `Overview.md`) to open search scoped to that project.
+
+Every `Overview.md` opens with a `> [!tip]` callout spelling this out, so the filter is one glance
+away. (magma never edits your vault's Obsidian settings — it only writes its own map folder; the
+tag is the non-invasive way to scope the graph.)
+
 ### Self-refresh
 
 Building the graph is the expensive step, so magma **skips it when a current map already
