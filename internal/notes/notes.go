@@ -5,7 +5,11 @@
 // touches time.* or math/rand.
 package notes
 
-import "github.com/robot-accomplice/magma/internal/contract"
+import (
+	"sort"
+
+	"github.com/robot-accomplice/magma/internal/contract"
+)
 
 // Options configures how a graph is rendered into notes.
 type Options struct {
@@ -35,4 +39,67 @@ type Metrics struct {
 	Exported, GeneratedN, TestFuncs  int
 	EntryPoints                      []contract.Node // sorted by symbol
 	MostCalled, MostCalling          []DegreeRow     // top-N, sorted desc by degree then symbol
+}
+
+// Render is the package entrypoint: it produces every markdown file for the map,
+// keyed by folder-relative path, plus the sorted manifest of those paths. Pure.
+func Render(g contract.Graph, dead, testOnly contract.Note, opts Options) (files map[string]string, manifest []string) {
+	if opts.Hotspots == 0 {
+		opts.Hotspots = defaultHotspots
+	}
+
+	selected := selectNodes(g, opts.Depth, opts.From)
+	m := computeMetrics(g, opts.Hotspots)
+
+	files = make(map[string]string)
+	files["Overview.md"] = overview(g, dead, testOnly, m, opts)
+
+	if g.Computable {
+		files["Dead code.md"] = deadIndex(dead.Rows, g, selected)
+		files["Test-only code.md"] = testOnlyIndex(testOnly.Rows, g, selected)
+		files["Packages.md"] = packagesIndex(g, selected)
+
+		byID := make(map[int]contract.Node, len(g.Nodes))
+		for _, n := range g.Nodes {
+			byID[n.ID] = n
+		}
+		for _, n := range g.Nodes {
+			if !selected[n.ID] {
+				continue
+			}
+			var out []contract.Edge
+			for _, e := range g.Edges {
+				if e.From == n.ID {
+					out = append(out, e)
+				}
+			}
+			files[notePath(n, g.Module)] = functionNote(n, out, byID, g.Module)
+		}
+	}
+
+	manifest = make([]string, 0, len(files))
+	for k := range files {
+		manifest = append(manifest, k)
+	}
+	sort.Strings(manifest)
+
+	return files, manifest
+}
+
+// Reconcile returns the folder-relative paths present in oldManifest but not in
+// newManifest — stale notes a caller should delete.
+func Reconcile(oldManifest, newManifest []string) []string {
+	inNew := make(map[string]bool, len(newManifest))
+	for _, p := range newManifest {
+		inNew[p] = true
+	}
+
+	var stale []string
+	for _, p := range oldManifest {
+		if !inNew[p] {
+			stale = append(stale, p)
+		}
+	}
+	sort.Strings(stale)
+	return stale
 }
