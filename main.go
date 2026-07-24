@@ -259,7 +259,9 @@ func run(repoArg, name, outRoot string, opts runOpts) error {
 // mismatch means a magma upgrade must re-map even at the same commit; a missing
 // manifest or a manifest listing a note that's since been deleted means the
 // vault is incomplete (a JSON-only folder from an older run, or a partially
-// wiped notes set) and must be rebuilt, not silently accepted as current.
+// wiped notes set) and must be rebuilt, not silently accepted as current. A
+// stored graph that was refused (Computable=false) is never fresh either — a
+// refusal must always re-attempt, never be silently repeated as "already fresh".
 func isFresh(out string, meta contract.Meta) bool {
 	if strings.HasSuffix(meta.Tree, "-dirty") {
 		return false
@@ -279,6 +281,9 @@ func isFresh(out string, meta contract.Meta) bool {
 		return false
 	}
 	if g.Tree != meta.Tree || g.Generator != meta.Generator {
+		return false
+	}
+	if !g.Computable {
 		return false
 	}
 
