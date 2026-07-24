@@ -812,8 +812,9 @@ func TestRollupAggregates(t *testing.T) {
 		{ID: 2, Pkg: "b", Symbol: "Helper", Reachable: true, ProdReachable: true},
 	}
 	edges := []contract.Edge{
-		{From: 0, To: 2, Kind: "dynamic"}, // a -> b, dynamic
-		{From: 2, To: 2, Kind: "static"},  // b -> b, intra-module (excluded from module_calls)
+		{From: 0, To: 2, Kind: "dynamic"}, // a -> b (Main -> Helper), dynamic
+		{From: 1, To: 2, Kind: "static"},  // a -> b (Dead -> Helper): a SECOND underlying call for the SAME module pair
+		{From: 2, To: 2, Kind: "static"},  // b -> b, intra-module (excluded from module_calls AND fan)
 	}
 	ids := assignIDs(nodes)
 	mods, mcalls := rollup(nodes, edges, ids)
@@ -825,10 +826,12 @@ func TestRollupAggregates(t *testing.T) {
 	if byID["a"].Counts.Functions != 2 || byID["a"].Counts.Dead != 1 {
 		t.Errorf("module a counts = %+v, want functions=2 dead=1", byID["a"].Counts)
 	}
-	// Module fan = distinct module-graph degree: a has one out-edge (a->b), no in;
-	// b has one in-edge (from a), no out (its self-edge b->b is intra-module).
+	// Module fan = distinct module-graph degree. TWO underlying a->b calls exist,
+	// but the degree is still 1 (one distinct pair). This is the assertion that
+	// distinguishes correct post-aggregation degree from a per-edge-count regression:
+	// per-edge counting would make a.FanOut == 2 here and fail.
 	if byID["a"].FanOut != 1 || byID["a"].FanIn != 0 {
-		t.Errorf("module a fan = in%d out%d, want in0 out1", byID["a"].FanIn, byID["a"].FanOut)
+		t.Errorf("module a fan = in%d out%d, want in0 out1 (degree, not 2 underlying calls)", byID["a"].FanIn, byID["a"].FanOut)
 	}
 	if byID["b"].FanIn != 1 || byID["b"].FanOut != 0 {
 		t.Errorf("module b fan = in%d out%d, want in1 out0", byID["b"].FanIn, byID["b"].FanOut)
@@ -836,8 +839,9 @@ func TestRollupAggregates(t *testing.T) {
 	if len(mcalls) != 1 {
 		t.Fatalf("module_calls = %d, want 1 (a->b; intra-module b->b excluded)", len(mcalls))
 	}
-	if mcalls[0].From != "a" || mcalls[0].To != "b" || !mcalls[0].HasDynamic || mcalls[0].Count != 1 {
-		t.Errorf("module_call = %+v, want a->b count=1 has_dynamic=true", mcalls[0])
+	// Count = 2 underlying edges collapsed into the one a->b module edge.
+	if mcalls[0].From != "a" || mcalls[0].To != "b" || !mcalls[0].HasDynamic || mcalls[0].Count != 2 {
+		t.Errorf("module_call = %+v, want a->b count=2 has_dynamic=true", mcalls[0])
 	}
 }
 ```
