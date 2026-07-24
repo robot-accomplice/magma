@@ -52,14 +52,14 @@ type-precise call graph in-process — no third-party analyzer binaries to insta
 ## Usage
 
 ```
-magma [--force] <repo-path> <name> <output-root>
+magma [--force] <repo-path> <folder-name> <vault-path>
 ```
 
 | argument | meaning |
 |---|---|
 | `<repo-path>` | the Git repository to analyze (language auto-detected) |
-| `<name>` | a label for this map, and the subdirectory written under `<output-root>` (a single path component) |
-| `<output-root>` | where the map is written, as `<output-root>/<name>/` |
+| `<folder-name>` | a label for this map, and the folder created for it inside the vault (a single path component) |
+| `<vault-path>` | the vault directory the map folder is written into, as `<vault-path>/<folder-name>/` |
 
 | flag | meaning |
 |---|---|
@@ -71,7 +71,7 @@ Run `magma --help` for the complete screen.
 
 ### Output
 
-A run writes three files to `<output-root>/<name>/`:
+A run writes three files to `<vault-path>/<folder-name>/`:
 
 | file | contract | what it is |
 |---|---|---|

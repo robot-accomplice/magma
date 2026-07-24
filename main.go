@@ -25,7 +25,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
 
 	"github.com/robot-accomplice/magma/internal/backend"
 	"github.com/robot-accomplice/magma/internal/contract"
@@ -46,7 +50,7 @@ func main() {
 		fmt.Println("magma " + version)
 		return
 	case len(opt.pos) != 3:
-		fmt.Fprint(os.Stderr, usageText()) // misuse goes to stderr, exit 2
+		fmt.Fprint(os.Stderr, usageText()) // misuse prints the help to stderr, exit 2
 		os.Exit(2)
 	}
 	if err := run(opt.pos[0], opt.pos[1], opt.pos[2], opt.force); err != nil {
@@ -91,14 +95,14 @@ func usageText() string {
 		"derives reachability views (dead code, test-only code). Deterministic and LLM-free:\n" +
 		"same repo + SHA → same graph. Skips the rebuild when a fresh map already exists.\n\n" +
 		"USAGE:\n" +
-		"  magma [--force] <repo-path> <name> <output-root>\n\n" +
+		"  magma [--force] <repo-path> <folder-name> <vault-path>\n\n" +
 		"ARGUMENTS:\n" +
 		"  <repo-path>     path to the Git repository to analyze (language is auto-detected;\n" +
 		"                  v" + version + " supports Go — others are refused honestly)\n" +
-		"  <name>          a label for this map, and the subdirectory it is written to under\n" +
-		"                  <output-root>. Must be a single path component (no '/', '\\', '.', '..')\n" +
-		"  <output-root>   directory the map is written under, as <output-root>/<name>/,\n" +
-		"                  producing graph.json, _dead.json and _test-only.json\n\n" +
+		"  <folder-name>   a label for this map, and the folder created for it inside the\n" +
+		"                  vault. Must be a single path component (no '/', '\\', '.', '..')\n" +
+		"  <vault-path>    the vault directory the map folder is written into, as\n" +
+		"                  <vault-path>/<folder-name>/ — graph.json, _dead.json, _test-only.json\n\n" +
 		"FLAGS:\n" +
 		"  -f, --force     rebuild even when a fresh map already exists for this commit\n" +
 		"  -h, --help      show this help and exit\n" +
@@ -147,25 +151,22 @@ func run(repoArg, name, outRoot string, force bool) error {
 	lang := detect.Detect(repo)
 	b, ok := backend.For(lang)
 	if !ok {
-		return writeRefusal(out, meta, lang)
+		// Still emit the (refused) artifacts and the panel, but exit non-zero so
+		// the audit gate and shells see the refusal.
+		g := refusedGraph(meta, lang)
+		if err := emitReport(out, meta, name, g); err != nil {
+			return err
+		}
+		return fmt.Errorf("%s", g.NotComputableReason)
 	}
 
 	prog, clearProg := newProgress()
 	g, err := b.BuildGraph(repo, meta, prog)
-	if err != nil {
-		clearProg()
-		return err
-	}
-	if prog != nil {
-		prog("writing map")
-	}
-	dead, testOnly, err := writeArtifacts(out, meta, g)
 	clearProg()
 	if err != nil {
 		return err
 	}
-	fmt.Print(report(name, out, g, dead, testOnly))
-	return nil
+	return emitReport(out, meta, name, g)
 }
 
 // isFresh reports whether a complete, current map already exists at out — the
@@ -228,21 +229,27 @@ func expandTilde(path, home string) string {
 	return path
 }
 
-// writeRefusal records an explicit, machine-readable refusal when no backend
+// refusedGraph builds an explicit, machine-readable refusal when no backend
 // exists for the detected language — the audit gate must see a refusal, never a
 // missing file it could read as "nothing to report".
-func writeRefusal(out string, meta contract.Meta, lang detect.Lang) error {
+func refusedGraph(meta contract.Meta, lang detect.Lang) contract.Graph {
 	var reason string
 	if lang == detect.Unknown {
 		reason = "no supported language detected (no go.mod, Cargo.toml, package.json, Gradle, or pom.xml)"
 	} else {
 		reason = fmt.Sprintf("language %q detected but its parser is not built yet (magma %s supports Go)", lang, version)
 	}
-	g := contract.NewGraph(meta, string(lang), "").Refuse(reason)
-	if _, _, err := writeArtifacts(out, meta, g); err != nil {
+	return contract.NewGraph(meta, string(lang), "").Refuse(reason)
+}
+
+// emitReport writes the three artifacts and prints the styled panel to stdout.
+func emitReport(out string, meta contract.Meta, name string, g contract.Graph) error {
+	dead, testOnly, err := writeArtifacts(out, meta, g)
+	if err != nil {
 		return err
 	}
-	return fmt.Errorf("%s", reason)
+	fmt.Print(report(newStyler(os.Stdout), name, out, g, dead, testOnly))
+	return nil
 }
 
 // writeArtifacts emits the graph and its two derived views together (so the three
@@ -261,49 +268,195 @@ func writeArtifacts(out string, meta contract.Meta, g contract.Graph) (dead, tes
 	return dead, testOnly, err
 }
 
-// report is the end-of-run breakdown printed to stdout: counts for a computable
-// run, and the refusal reason (never a misleading 0) for anything that could not
-// be computed.
-func report(name, out string, g contract.Graph, dead, testOnly contract.Note) string {
+// ---- presentation ----
+
+// styler applies ANSI SGR codes, but only when enabled (a real terminal with
+// NO_COLOR unset). Disabled, it returns text unchanged, so piped/CI output and
+// tests stay plain — the zero value is disabled.
+type styler struct{ on bool }
+
+func newStyler(f *os.File) styler {
+	return styler{on: isTerminal(f) && os.Getenv("NO_COLOR") == ""}
+}
+
+func (s styler) paint(code, text string) string {
+	if !s.on || text == "" {
+		return text
+	}
+	return "\033[" + code + "m" + text + "\033[0m"
+}
+
+// ANSI SGR codes used in the report.
+const (
+	cBold   = "1"
+	cDim    = "2"
+	cRed    = "31"
+	cGreen  = "32"
+	cYellow = "33"
+	cCyan   = "36"
+)
+
+// vlen is the display width of s in columns (runes), used for box alignment.
+func vlen(s string) int { return utf8.RuneCountInString(s) }
+
+// humanCount formats an int with thousands separators (17346 -> "17,346").
+func humanCount(n int) string {
+	s := strconv.Itoa(n)
+	neg := ""
+	if strings.HasPrefix(s, "-") {
+		neg, s = "-", s[1:]
+	}
+	var out []byte
+	for i := 0; i < len(s); i++ {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, s[i])
+	}
+	return neg + string(out)
+}
+
+// report renders the end-of-run breakdown as a bordered panel. Counts for a
+// computable run; a refused view or graph shows its reason (never a misleading 0).
+func report(s styler, name, out string, g contract.Graph, dead, testOnly contract.Note) string {
 	lang := g.Language
 	if lang == "" {
 		lang = "none"
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "magma: %s [%s @ %s] -> %s\n", name, lang, g.Tree, out)
+	rightHdr := lang + " · " + g.Tree
+
+	type row struct{ label, value, code string }
+	var rows []row
+	var notes []string
+
 	if !g.Computable {
-		fmt.Fprintf(&b, "  refused: %s\n", g.NotComputableReason)
-		return b.String()
+		rows = append(rows, row{"status", "refused", cRed})
+		notes = append(notes, g.NotComputableReason)
+	} else {
+		deadVal, deadCode := viewCell(dead, func(c int) string {
+			if c > 0 {
+				return cYellow
+			}
+			return cGreen
+		})
+		toVal, toCode := viewCell(testOnly, func(int) string { return cDim })
+		rows = []row{
+			{"nodes", humanCount(len(g.Nodes)), ""},
+			{"edges", humanCount(len(g.Edges)), ""},
+			{"dead code", deadVal, deadCode},
+			{"test-only", toVal, toCode},
+			{"fidelity", g.Fidelity, cCyan},
+		}
+		if r := refusalReason(dead, testOnly); r != "" {
+			notes = append(notes, "reachability views refused: "+r)
+		}
 	}
-	fmt.Fprintf(&b, "  nodes      %8d\n", len(g.Nodes))
-	fmt.Fprintf(&b, "  edges      %8d\n", len(g.Edges))
-	fmt.Fprintf(&b, "  dead code  %s\n", viewCount(dead))
-	fmt.Fprintf(&b, "  test-only  %s\n", viewCount(testOnly))
-	fmt.Fprintf(&b, "  fidelity   %8s\n", g.Fidelity)
+
+	// inner is the visible width between the box's single-space side padding.
+	// Width is counted in runes, not bytes — the middle dot in the header and any
+	// non-ASCII symbol are one display column, not their UTF-8 byte length.
+	inner := vlen(name) + vlen(rightHdr)
+	for _, r := range rows {
+		if w := vlen(r.label) + vlen(r.value); w > inner {
+			inner = w
+		}
+	}
+	inner += 4 // minimum gap between the left label and the right value
+	if inner < 30 {
+		inner = 30
+	}
+
+	// justify lays a left and right token across `inner` visible columns, then
+	// colors each — padding is computed on the plain text so the color codes
+	// (zero display width) never break alignment.
+	justify := func(left, lcode, right, rcode string) string {
+		gap := inner - vlen(left) - vlen(right)
+		if gap < 1 {
+			gap = 1
+		}
+		return s.paint(lcode, left) + strings.Repeat(" ", gap) + s.paint(rcode, right)
+	}
+	dash := func(n int) string { return strings.Repeat("─", n) }
+	boxRow := func(content string) string {
+		return s.paint(cDim, "│ ") + content + s.paint(cDim, " │")
+	}
+
+	var b strings.Builder
+	// Titled top border: ╭─ magma ───╮
+	fmt.Fprintln(&b, s.paint(cDim, "╭─ ")+s.paint(cCyan, "magma")+s.paint(cDim, " "+dash(inner-6)+"╮"))
+	fmt.Fprintln(&b, boxRow(justify(name, cBold, rightHdr, cDim)))
+	fmt.Fprintln(&b, s.paint(cDim, "├"+dash(inner+2)+"┤"))
+	for _, r := range rows {
+		fmt.Fprintln(&b, boxRow(justify(r.label, cDim, r.value, r.code)))
+	}
+	fmt.Fprintln(&b, s.paint(cDim, "╰"+dash(inner+2)+"╯"))
+	fmt.Fprintln(&b, s.paint(cDim, "→ ")+out)
+	for _, n := range notes {
+		fmt.Fprintln(&b, s.paint(cDim, "  "+n))
+	}
 	return b.String()
 }
 
-// viewCount renders a view's row count, or its refusal reason so a refused view
-// is never mistaken for "found nothing".
-func viewCount(n contract.Note) string {
+// viewCell renders a view's row count coloured by `color`, or a red "refused"
+// so a refused view is never mistaken for "found nothing".
+func viewCell(n contract.Note, color func(int) string) (value, code string) {
 	if !n.ReachabilityComputable {
-		return "refused (" + n.NotComputableReason + ")"
+		return "refused", cRed
 	}
-	return fmt.Sprintf("%8d", len(n.Rows))
+	c := len(n.Rows)
+	return humanCount(c), color(c)
 }
 
-// newProgress returns a stage reporter that overwrites a single stderr line, plus
-// a cleanup that erases it. When stderr is not a terminal (pipe, CI) it reports
-// nothing, so logs and captured output stay clean.
+// refusalReason returns the reason a view could not be computed, if any.
+func refusalReason(dead, testOnly contract.Note) string {
+	if !dead.ReachabilityComputable {
+		return dead.NotComputableReason
+	}
+	if !testOnly.ReachabilityComputable {
+		return testOnly.NotComputableReason
+	}
+	return ""
+}
+
+// newProgress returns a stage reporter backed by an animated spinner on its own
+// goroutine (so the line keeps moving during a multi-second phase), plus a cleanup
+// that stops it and erases the line. When stderr is not a terminal (pipe, CI) it
+// reports nothing, so logs and captured output stay clean.
 func newProgress() (backend.Progress, func()) {
 	if !isTerminal(os.Stderr) {
 		return nil, func() {}
 	}
-	p := func(stage string) {
-		fmt.Fprintf(os.Stderr, "\r  %s…\033[K", stage) // \033[K clears to end of line
+	s := newStyler(os.Stderr)
+	frames := []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+	var mu sync.Mutex
+	stage := "starting"
+	stop, done := make(chan struct{}), make(chan struct{})
+	ticker := time.NewTicker(80 * time.Millisecond)
+
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				st := stage
+				mu.Unlock()
+				fmt.Fprintf(os.Stderr, "\r%s %s\033[K",
+					s.paint(cCyan, string(frames[i%len(frames)])), s.paint(cDim, st))
+			}
+		}
+	}()
+
+	progress := func(st string) { mu.Lock(); stage = st; mu.Unlock() }
+	clear := func() {
+		ticker.Stop()
+		close(stop)
+		<-done
+		fmt.Fprint(os.Stderr, "\r\033[K")
 	}
-	clear := func() { fmt.Fprint(os.Stderr, "\r\033[K") }
-	return p, clear
+	return progress, clear
 }
 
 func isTerminal(f *os.File) bool {
