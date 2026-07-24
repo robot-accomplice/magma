@@ -20,8 +20,9 @@ const maxFlowchartPackages = 20
 // date), size, reachability (+ mermaid pie, + caution callout if dead>0), surface +
 // entry-point links, hotspots (mermaid pie of call concentration + ranked [[link]]
 // lists), an entry-point->package mermaid flowchart, a graph-view recipe (+
-// optional Advanced-URI one-click link), fidelity in plain English, and refusal
-// callouts. Deterministic except opts.Validated (caller-supplied wall clock).
+// optional Advanced-URI one-click link), a jargon-free note on what a call edge
+// means, and refusal callouts. Deterministic except opts.Validated
+// (caller-supplied wall clock).
 func overview(g contract.Graph, dead, testOnly contract.Note, m Metrics, opts Options) string {
 	var b strings.Builder
 
@@ -51,8 +52,8 @@ func overview(g contract.Graph, dead, testOnly contract.Note, m Metrics, opts Op
 	b.WriteString("\n## Graph view\n\n")
 	b.WriteString(graphViewRecipe(opts))
 
-	b.WriteString("\n## Fidelity\n\n")
-	b.WriteString(fidelityProse())
+	b.WriteString("\n## Reading the edges\n\n")
+	b.WriteString(edgeNote())
 
 	return b.String()
 }
@@ -201,9 +202,12 @@ func graphViewRecipe(opts Options) string {
 	return b.String()
 }
 
-// fidelityProse explains what an edge means in plain English.
-func fidelityProse() string {
-	return "Edges are an **RTA call graph**: direct calls are exact; dynamic calls through interfaces or function values are approximated.\n"
+// edgeNote explains what an edge means in plain, jargon-free English: no
+// mention of "fidelity" or the analysis technique's name, just what a reader
+// can and can't trust about a call.
+func edgeNote() string {
+	return "> [!note] Reading the edges\n" +
+		"> Direct calls are exact. Calls through interfaces or function values are approximated — they may include paths that can't occur at runtime, but never miss a real one.\n"
 }
 
 // entryPackageFlowchart renders a mermaid flowchart from each entry point to

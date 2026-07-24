@@ -18,12 +18,18 @@ func TestOverview(t *testing.T) {
 		"abc123",            // tree
 		"```mermaid", "pie", // a mermaid pie is present
 		"flowchart",                 // entry-point -> package mermaid flowchart
-		"RTA call graph",            // fidelity in plain English
+		"approximated",              // edge-precision note, jargon-free
 		"⌘/Ctrl", `path:"ex/nodes"`, // graph-view recipe
 		"[[sub/B]]", // a hotspot link (module-relative wikiTarget)
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview missing %q in:\n%s", want, out)
+		}
+	}
+	// No jargon: "fidelity" and "RTA" must never leak into the reader-facing note.
+	for _, unwanted := range []string{"fidelity", "RTA"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("overview must not contain jargon %q in:\n%s", unwanted, out)
 		}
 	}
 }
