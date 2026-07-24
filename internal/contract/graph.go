@@ -11,6 +11,25 @@ import (
 // breaking change to the envelope.
 const GraphVersion = "codemap-graph/1"
 
+// Param is one function parameter: its name (may be empty for unnamed params)
+// and its module-relative type string (e.g. "contract.Graph", "int").
+type Param struct {
+	Name string `json:"name,omitempty"`
+	Type string `json:"type"`
+}
+
+// Result is one function result type. Result names are intentionally dropped —
+// the type is the architecture-relevant fact.
+type Result struct {
+	Type string `json:"type"`
+}
+
+// Signature is a function's parameters and results, as rendered by the backend.
+type Signature struct {
+	Params  []Param  `json:"params"`
+	Results []Result `json:"results"`
+}
+
 // Node is one function or method in the program.
 type Node struct {
 	ID        int    `json:"id"`
@@ -29,6 +48,30 @@ type Node struct {
 	// ProdReachable is true when a path exists from a NON-test root. A node that
 	// is Reachable but not ProdReachable is reached only by tests.
 	ProdReachable bool `json:"prod_reachable"`
+
+	// Signature is the function's parameters and results. Nil for backends that
+	// do not (yet) extract signatures. Set for every Go node.
+	Signature *Signature `json:"signature,omitempty"`
+	// Doc is the first sentence of the declaration's doc comment ("" if none).
+	Doc string `json:"doc,omitempty"`
+	// FanIn / FanOut are the distinct in/out call-edge counts, derived from the graph.
+	FanIn  int `json:"fan_in"`
+	FanOut int `json:"fan_out"`
+}
+
+// IsDead reports whether this node is production-dead: reachable from no root.
+// Roots are reachable by definition; generated code is not hand-audited for
+// deadness. This is the per-node predicate DeadView filters on.
+func (n Node) IsDead() bool {
+	return !n.Reachable && !n.Generated && !n.Root
+}
+
+// IsTestOnly reports whether this node is production code kept alive only by
+// tests: reachable (with tests) but not production-reachable, and itself declared
+// in production, non-generated, non-root code. This is the per-node predicate
+// TestOnlyView filters on.
+func (n Node) IsTestOnly() bool {
+	return n.Reachable && !n.ProdReachable && !n.Test && !n.Root && !n.Generated
 }
 
 // Edge is a call from one node to another. Kind distinguishes a resolved static
@@ -112,7 +155,7 @@ func (g Graph) DeadView(m Meta) Note {
 	}
 	var rows []Row
 	for _, n := range g.Nodes {
-		if !n.Reachable && !n.Generated && !n.Root {
+		if n.IsDead() {
 			rows = append(rows, Row{Symbol: n.Symbol, File: n.File, Line: n.Line})
 		}
 	}
@@ -135,7 +178,7 @@ func (g Graph) TestOnlyView(m Meta) Note {
 	}
 	var rows []Row
 	for _, n := range g.Nodes {
-		if n.Reachable && !n.ProdReachable && !n.Test && !n.Root && !n.Generated {
+		if n.IsTestOnly() {
 			rows = append(rows, Row{Symbol: n.Symbol, File: n.File, Line: n.Line})
 		}
 	}
