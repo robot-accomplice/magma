@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -598,6 +599,40 @@ func TestRunArchitextFlagEmitsOnRefusal(t *testing.T) {
 		if !strings.Contains(string(b), `"computable": false`) {
 			t.Errorf("%s should be a refused code-graph (computable:false), got:\n%s", p, b)
 		}
+	}
+}
+
+// The artifact --architext writes into the repo (docs/architext/data/) is
+// untracked on disk, so a naive dirty check would see it on the SECOND run and
+// stamp tree: "<sha>-dirty" — flipping the otherwise-deterministic envelope.
+// Running twice against a clean, committed fixture must produce byte-identical
+// repo-side code-graph.json output both times.
+func TestArchitextEmissionIsDeterministicAcrossRuns(t *testing.T) {
+	repo := gitRepo(t, map[string]string{
+		"go.mod":  "module tmpmod\n\ngo 1.21\n",
+		"main.go": "package main\n\nfunc main() { Live() }\n\nfunc Live() {}\n\nfunc Dead() {}\n",
+	})
+	outRoot := t.TempDir()
+	repoDest := filepath.Join(repo, "docs", "architext", "data", architext.FileName)
+
+	if err := run(repo, "proj", outRoot, runOpts{architext: true}); err != nil {
+		t.Fatalf("run (first): %v", err)
+	}
+	first, err := os.ReadFile(repoDest)
+	if err != nil {
+		t.Fatalf("reading %s after first run: %v", repoDest, err)
+	}
+
+	if err := run(repo, "proj", outRoot, runOpts{architext: true}); err != nil {
+		t.Fatalf("run (second): %v", err)
+	}
+	second, err := os.ReadFile(repoDest)
+	if err != nil {
+		t.Fatalf("reading %s after second run: %v", repoDest, err)
+	}
+
+	if !bytes.Equal(first, second) {
+		t.Errorf("two --architext runs produced different bytes:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 }
 
