@@ -67,8 +67,21 @@ present**; its absence is not an error (a repo that has never run magma is still
 
 ## Graph-view renderer (viewer/)
 
-A new view in the React/Vite viewer, driven directly by `code-graph.json` (not by a
-`views.json` entry — it is a machine layer, not a curated view). Behavior:
+> **Confirmed against the Architext source (cross-session, 2026-07-24).** The viewer is
+> **Leptos 0.6 CSR (Rust → WASM)**, not React/Vite. Discovery is **manifest-driven**: an
+> optional `manifest.files.codeGraph` key, auto-registered by `architext sync`/`doctor` when
+> `code-graph.json` is present — not a bare unmanaged file drop; `validate` and the viewer both
+> resolve the data URL from the manifest. Static vs dynamic edges are distinguished by
+> **marker/colour** (connectors stay solid; dashing is reserved for sequence views). Architext's
+> scope this cycle is all-in-one: schema + a dedicated code-graph internal-ref validation pass
+> (`calls`→`functions`, `module.function_ids`→`functions`, `module_calls`→`modules`) + manifest
+> auto-registration + the `Mode::CodeGraph` view. Versioning on their side: manifest data schema
+> 1.5.0→1.6.0 (additive optional key), CLI 1.7.9→1.8.0; magma's `contract_version` stays
+> independent. The authoritative implementation lives in the architext repo; this section is
+> magma's design-time draft of it, corrected to those facts.
+
+A new `Mode::CodeGraph` view in the Leptos viewer, driven by `code-graph.json` (resolved via the
+manifest's `files.codeGraph` key — a machine layer, not a curated `views.json` entry). Behavior:
 
 - **Hybrid drill-down.** Default zoom shows `modules[]` + `module_calls[]` (coarse). Expanding a
   module reveals its `functions[]` and intra-module `calls[]`. This is why the artifact carries
@@ -80,11 +93,11 @@ A new view in the React/Vite viewer, driven directly by `code-graph.json` (not b
   hide callers) — surfaced as a tooltip, not asserted as fact.
 - **Edge styling.** `static` vs `dynamic` calls are visually distinct; `dynamic` is labeled as
   the RTA over-approximation, matching magma's `fidelity`.
-- **Empty / refused states.** No file → architecture layer only, with a hint to run magma.
+- **Empty / refused states.** No manifest `files.codeGraph` entry → architecture layer only, with a hint to run magma.
   Refused file → show `not_computable_reason` verbatim. Never invent nodes.
 
 Renderer decomposition (clean-code / clean-architecture, below): parsing/validation, the
-view-model transform, and the React components are separate modules; the components receive a
+view-model transform, and the Leptos components are separate modules; the components receive a
 ready view-model and hold no ingestion logic.
 
 ## Dogfood: Architext for magma itself
@@ -104,10 +117,10 @@ this schema/renderer actually agree.
   split — and it is what the differential later reads across.
 - **Renderer layering (Dependency Rule).** Ingestion (schema-validate + parse `code-graph.json`)
   → view-model transform → presentation components. Arrows point inward toward the view-model;
-  React components (outer detail) depend on the view-model, never the reverse, and contain no
+  Leptos components (outer detail) depend on the view-model, never the reverse, and contain no
   parsing. Swapping the graph library touches only the presentation ring.
 - **Boundary DTOs.** The raw JSON is mapped to a typed view-model at ingestion; components never
-  see raw contract JSON. Framework types (React, the graph lib) never leak inward to the
+  see raw contract JSON. Framework types (Leptos, the graph lib) never leak inward to the
   transform.
 - **Testability by design.** The view-model transform is testable with an in-memory parsed
   artifact — no DOM, no browser.
