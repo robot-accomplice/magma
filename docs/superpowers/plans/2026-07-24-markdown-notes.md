@@ -16,6 +16,7 @@
 - Pointers not payloads: notes carry `file:line`, never source bodies.
 - Coverage stays ≥ 80% overall (`go test ./... -coverprofile` gate in CI/justfile).
 - Note names are plain (no leading underscore): `Overview.md`, `Dead code.md`, `Test-only code.md`, `Packages.md`, `nodes/<pkg-rel>/<Symbol>.md`.
+- **Every `[[...]]` link target uses `wikiTarget(node, module)` — module-relative, matching `notePath`.** e.g. for module `ex`, node `B` in pkg `ex/sub` → file `nodes/sub/B.md`, link `[[sub/B]]` (NOT `[[ex/sub/B]]`). A node whose pkg equals the module → `[[<Symbol>]]`. Links and file paths MUST agree or Obsidian can't resolve them.
 - JSON files keep their contract names (`graph.json`, `_dead.json`, `_test-only.json`) and move under `<folder>/.magma/`.
 - Every commit runs `gofmt`, `go vet`, `go test ./...` green before committing.
 
@@ -369,7 +370,7 @@ func TestFunctionNote(t *testing.T) {
 	out := functionNote(byID[1], []contract.Edge{{From: 1, To: 2, Kind: "static"}}, byID, "ex")
 	for _, want := range []string{
 		"---", "pkg: ex", "file: a.go", "line: 5", "kind: func", "exported: true",
-		"`a.go:5`", "## Calls", "[[ex/sub/B]]",
+		"`a.go:5`", "## Calls", "[[sub/B]]",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("note missing %q in:\n%s", want, out)
@@ -423,11 +424,11 @@ func TestIndexNotes(t *testing.T) {
 	g := fixtureGraph()
 	sel := map[int]bool{0: true, 1: true, 2: true, 3: true}
 	dead := deadIndex([]contract.Row{{Symbol: "C", File: "c.go", Line: 3}}, g, sel)
-	if !strings.Contains(dead, "[[ex/C]]") || !strings.Contains(dead, "candidate") {
+	if !strings.Contains(dead, "[[C]]") || !strings.Contains(dead, "candidate") {
 		t.Errorf("dead index wrong:\n%s", dead)
 	}
 	pkgs := packagesIndex(g, sel)
-	if !strings.Contains(pkgs, "[[ex/sub/B]]") {
+	if !strings.Contains(pkgs, "[[sub/B]]") {
 		t.Errorf("packages index missing B:\n%s", pkgs)
 	}
 }
@@ -486,7 +487,7 @@ func TestOverview(t *testing.T) {
 		"```mermaid", "pie",       // a mermaid pie is present
 		"RTA call graph",          // fidelity in plain English
 		"⌘/Ctrl", `path:"ex/nodes"`, // graph-view recipe
-		"[[ex/B]]",                // a hotspot link
+		"[[sub/B]]",               // a hotspot link (module-relative wikiTarget)
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview missing %q in:\n%s", want, out)
