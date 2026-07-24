@@ -90,7 +90,11 @@ func packagesIndex(g contract.Graph, selected map[int]bool) string {
 	for _, pkg := range pkgs {
 		links := byPkg[pkg]
 		sort.Strings(links)
-		fmt.Fprintf(&b, "## %s\n", pkg)
+		heading := pkg
+		if heading == "" {
+			heading = "(root)"
+		}
+		fmt.Fprintf(&b, "## %s\n", heading)
 		for _, l := range links {
 			fmt.Fprintf(&b, "- [[%s]]\n", l)
 		}
