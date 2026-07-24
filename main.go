@@ -111,6 +111,13 @@ func usageText() string {
 }
 
 func run(repoArg, name, outRoot string, force bool) error {
+	// Expand a leading ~ ourselves: a path quoted for spaces (e.g. "~/Claude
+	// Vault/x") is never expanded by the shell, and silently writing under cwd/~
+	// would be a data-in-the-wrong-place bug.
+	home, _ := os.UserHomeDir()
+	repoArg = expandTilde(repoArg, home)
+	outRoot = expandTilde(outRoot, home)
+
 	out, err := prepareOutput(name, outRoot)
 	if err != nil {
 		return err
@@ -143,11 +150,22 @@ func run(repoArg, name, outRoot string, force bool) error {
 		return writeRefusal(out, meta, lang)
 	}
 
-	g, err := b.BuildGraph(repo, meta)
+	prog, clearProg := newProgress()
+	g, err := b.BuildGraph(repo, meta, prog)
+	if err != nil {
+		clearProg()
+		return err
+	}
+	if prog != nil {
+		prog("writing map")
+	}
+	dead, testOnly, err := writeArtifacts(out, meta, g)
+	clearProg()
 	if err != nil {
 		return err
 	}
-	return writeAll(out, meta, g, name)
+	fmt.Print(report(name, out, g, dead, testOnly))
+	return nil
 }
 
 // isFresh reports whether a complete, current map already exists at out — the
@@ -197,6 +215,19 @@ func prepareOutput(name, outRoot string) (string, error) {
 	return out, nil
 }
 
+// expandTilde expands a leading ~ or ~/ to home. magma does this itself because
+// a path quoted to survive spaces is never expanded by the shell. Only a bare ~
+// or ~/... expands — ~user is left untouched.
+func expandTilde(path, home string) string {
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
 // writeRefusal records an explicit, machine-readable refusal when no backend
 // exists for the detected language — the audit gate must see a refusal, never a
 // missing file it could read as "nothing to report".
@@ -208,27 +239,74 @@ func writeRefusal(out string, meta contract.Meta, lang detect.Lang) error {
 		reason = fmt.Sprintf("language %q detected but its parser is not built yet (magma %s supports Go)", lang, version)
 	}
 	g := contract.NewGraph(meta, string(lang), "").Refuse(reason)
-	if err := writeAll(out, meta, g, ""); err != nil {
+	if _, _, err := writeArtifacts(out, meta, g); err != nil {
 		return err
 	}
 	return fmt.Errorf("%s", reason)
 }
 
-// writeAll emits the graph and its two derived views together, so the three
-// artifacts always agree on computability.
-func writeAll(out string, meta contract.Meta, g contract.Graph, name string) error {
-	if err := contract.WriteGraph(out, g); err != nil {
-		return err
+// writeArtifacts emits the graph and its two derived views together (so the three
+// artifacts always agree on computability) and returns the two views so the caller
+// can report on them without re-deriving.
+func writeArtifacts(out string, meta contract.Meta, g contract.Graph) (dead, testOnly contract.Note, err error) {
+	dead = g.DeadView(meta)
+	testOnly = g.TestOnlyView(meta)
+	if err = contract.WriteGraph(out, g); err != nil {
+		return dead, testOnly, err
 	}
-	if err := contract.Write(out, "_dead", g.DeadView(meta)); err != nil {
-		return err
+	if err = contract.Write(out, "_dead", dead); err != nil {
+		return dead, testOnly, err
 	}
-	if err := contract.Write(out, "_test-only", g.TestOnlyView(meta)); err != nil {
-		return err
+	err = contract.Write(out, "_test-only", testOnly)
+	return dead, testOnly, err
+}
+
+// report is the end-of-run breakdown printed to stdout: counts for a computable
+// run, and the refusal reason (never a misleading 0) for anything that could not
+// be computed.
+func report(name, out string, g contract.Graph, dead, testOnly contract.Note) string {
+	lang := g.Language
+	if lang == "" {
+		lang = "none"
 	}
-	if name != "" {
-		fmt.Printf("magma: %s [%s @ %s] %d nodes, %d edges -> %s\n",
-			name, g.Language, g.Tree, len(g.Nodes), len(g.Edges), out)
+	var b strings.Builder
+	fmt.Fprintf(&b, "magma: %s [%s @ %s] -> %s\n", name, lang, g.Tree, out)
+	if !g.Computable {
+		fmt.Fprintf(&b, "  refused: %s\n", g.NotComputableReason)
+		return b.String()
 	}
-	return nil
+	fmt.Fprintf(&b, "  nodes      %8d\n", len(g.Nodes))
+	fmt.Fprintf(&b, "  edges      %8d\n", len(g.Edges))
+	fmt.Fprintf(&b, "  dead code  %s\n", viewCount(dead))
+	fmt.Fprintf(&b, "  test-only  %s\n", viewCount(testOnly))
+	fmt.Fprintf(&b, "  fidelity   %8s\n", g.Fidelity)
+	return b.String()
+}
+
+// viewCount renders a view's row count, or its refusal reason so a refused view
+// is never mistaken for "found nothing".
+func viewCount(n contract.Note) string {
+	if !n.ReachabilityComputable {
+		return "refused (" + n.NotComputableReason + ")"
+	}
+	return fmt.Sprintf("%8d", len(n.Rows))
+}
+
+// newProgress returns a stage reporter that overwrites a single stderr line, plus
+// a cleanup that erases it. When stderr is not a terminal (pipe, CI) it reports
+// nothing, so logs and captured output stay clean.
+func newProgress() (backend.Progress, func()) {
+	if !isTerminal(os.Stderr) {
+		return nil, func() {}
+	}
+	p := func(stage string) {
+		fmt.Fprintf(os.Stderr, "\r  %s…\033[K", stage) // \033[K clears to end of line
+	}
+	clear := func() { fmt.Fprint(os.Stderr, "\r\033[K") }
+	return p, clear
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

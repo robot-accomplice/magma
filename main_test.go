@@ -145,6 +145,69 @@ func TestUsageTextIsInformative(t *testing.T) {
 	}
 }
 
+// expandTilde expands a leading ~ or ~/ to the home dir — magma must do this
+// itself because a path quoted for spaces (e.g. "~/Claude Vault/x") is never
+// expanded by the shell.
+func TestExpandTilde(t *testing.T) {
+	home := "/home/jon"
+	cases := []struct{ in, want string }{
+		{"~", home},
+		{"~/Claude Vault/codemap", home + "/Claude Vault/codemap"},
+		{"/absolute/path", "/absolute/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+		{"~user/x", "~user/x"}, // only a bare ~ or ~/ expands, not ~user
+	}
+	for _, c := range cases {
+		if got := expandTilde(c.in, home); got != c.want {
+			t.Errorf("expandTilde(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// report is the end-of-run breakdown. A computable run shows counts; a refused
+// view shows its reason (not a misleading 0); a refused graph shows the top-level
+// refusal.
+func TestReport(t *testing.T) {
+	meta := contract.Meta{Generator: "magma/test", SHA: "abc123", Tree: "abc123", Fidelity: "rta"}
+
+	t.Run("computable shows counts", func(t *testing.T) {
+		g := contract.NewGraph(meta, "go", "rta")
+		g.Tree = "abc123"
+		g.Nodes = make([]contract.Node, 17)
+		g.Edges = make([]contract.Edge, 48)
+		dead := meta.Computed([]contract.Row{{Symbol: "A"}, {Symbol: "B"}})
+		to := meta.Computed([]contract.Row{{Symbol: "C"}})
+		r := report("roboticus", "/out/roboticus", g, dead, to)
+		for _, want := range []string{"roboticus", "abc123", "17", "48", "dead", "2", "test-only", "1", "rta", "/out/roboticus"} {
+			if !strings.Contains(r, want) {
+				t.Errorf("report missing %q in:\n%s", want, r)
+			}
+		}
+	})
+
+	t.Run("refused view shows reason not zero", func(t *testing.T) {
+		g := contract.NewGraph(meta, "go", "rta")
+		g.Nodes = make([]contract.Node, 5)
+		dead := meta.Refused("no production main in scope")
+		to := meta.Refused("no production main in scope")
+		r := report("lib", "/out/lib", g, dead, to)
+		if !strings.Contains(r, "refused") || !strings.Contains(r, "no production main") {
+			t.Errorf("refused view must show its reason, got:\n%s", r)
+		}
+	})
+
+	t.Run("refused graph shows top-level refusal", func(t *testing.T) {
+		g := contract.NewGraph(meta, "rust", "").Refuse("language \"rust\" not built yet")
+		dead := meta.Refused("language \"rust\" not built yet")
+		to := meta.Refused("language \"rust\" not built yet")
+		r := report("proj", "/out/proj", g, dead, to)
+		if !strings.Contains(r, "refused") || !strings.Contains(r, "rust") {
+			t.Errorf("refused graph must show the refusal, got:\n%s", r)
+		}
+	})
+}
+
 // isFresh is the idempotency guard: an existing map is fresh only when all three
 // files are present, the stamped tree matches the current CLEAN tree, and the
 // generator (magma version) matches — so a dirty tree or a version bump forces a

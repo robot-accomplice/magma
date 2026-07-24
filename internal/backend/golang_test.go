@@ -2,6 +2,7 @@ package backend
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/robot-accomplice/magma/internal/contract"
@@ -99,11 +100,35 @@ func buildFixture(t *testing.T, name string) contract.Graph {
 	if !ok {
 		t.Fatal("Go backend not registered")
 	}
-	g, err := b.BuildGraph(repo, fixtureMeta)
+	g, err := b.BuildGraph(repo, fixtureMeta, nil)
 	if err != nil {
 		t.Fatalf("BuildGraph(%s): %v", name, err)
 	}
 	return g
+}
+
+// BuildGraph reports its phases through the progress callback so the CLI can show
+// a live status line.
+func TestBuildGraphReportsProgress(t *testing.T) {
+	repo, err := filepath.Abs(filepath.Join("testdata", "livemod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := For(detect.Go)
+	var stages []string
+	spy := func(s string) { stages = append(stages, s) }
+	if _, err := b.BuildGraph(repo, fixtureMeta, spy); err != nil {
+		t.Fatal(err)
+	}
+	if len(stages) == 0 {
+		t.Fatal("expected progress stages, got none")
+	}
+	joined := strings.Join(stages, "|")
+	for _, want := range []string{"loading", "reachability", "edges"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("progress missing a %q stage; got %v", want, stages)
+		}
+	}
 }
 
 func hasStaticEdge(g contract.Graph, from, to int) bool {

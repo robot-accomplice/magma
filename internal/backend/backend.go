@@ -11,6 +11,11 @@ import (
 	"github.com/robot-accomplice/magma/internal/detect"
 )
 
+// Progress receives a short, human-readable stage label as analysis proceeds. It
+// may be nil (no reporting). It exists so the CLI can show a live status line
+// without the backend knowing anything about terminals.
+type Progress func(stage string)
+
 // Backend extracts the call graph for one language.
 type Backend interface {
 	// Language is the token this backend serves (matches detect.Lang).
@@ -19,7 +24,8 @@ type Backend interface {
 	// BuildGraph runs the real analysis over repo and returns the call graph,
 	// or a refused graph (Computable=false) with a reason. meta carries the
 	// provenance (sha, dirty, generator) the backend must not compute itself.
-	BuildGraph(repo string, meta contract.Meta) (contract.Graph, error)
+	// progress (may be nil) is called with a stage label at each phase.
+	BuildGraph(repo string, meta contract.Meta, progress Progress) (contract.Graph, error)
 }
 
 // registry maps a language to its backend, populated by each backend's init.
