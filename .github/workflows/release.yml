@@ -1,0 +1,70 @@
+name: Release
+
+# The captured release procedure: pushing a semver tag (e.g. v0.1.0) re-runs the
+# CI gates, verifies the tag matches the binary's reported version, cross-compiles
+# every target from one runner (magma is pure Go), and publishes a GitHub Release
+# with checksummed archives. This is the gate for promoting develop -> main.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release:
+    name: build & publish
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }} # attacker-controllable in theory: only ever used quoted, via env
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Re-run CI gates
+        run: |
+          unformatted="$(gofmt -l .)"
+          [ -z "$unformatted" ] || { echo "not gofmt-clean:"; echo "$unformatted"; exit 1; }
+          go vet ./...
+          go test ./... -covermode=atomic -coverprofile=coverage.out
+          pct="$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')"
+          echo "coverage ${pct}%"
+          awk "BEGIN { exit !(${pct} >= 80) }" || { echo "coverage below 80% gate"; exit 1; }
+
+      - name: Verify tag matches binary version
+        run: |
+          want="${TAG#v}"
+          got="$(go run . --version | awk '{print $2}')"
+          echo "tag=${want} binary=${got}"
+          [ "$want" = "$got" ] || {
+            echo "::error::tag ${TAG} does not match binary version ${got} (update the version const)"
+            exit 1; }
+
+      - name: Cross-compile release archives
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os="${t%/*}"; arch="${t#*/}"
+            bin="magma"; [ "$os" = "windows" ] && bin="magma.exe"
+            echo "==> ${os}/${arch}"
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "dist/${bin}" .
+            base="magma_${TAG}_${os}_${arch}"
+            if [ "$os" = "windows" ]; then
+              (cd dist && zip -q "${base}.zip" "$bin" && rm "$bin")
+            else
+              (cd dist && tar -czf "${base}.tar.gz" "$bin" && rm "$bin")
+            fi
+          done
+          (cd dist && sha256sum ./* > checksums.txt)
+          ls -la dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes
