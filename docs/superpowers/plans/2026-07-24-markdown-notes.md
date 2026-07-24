@@ -467,7 +467,7 @@ git commit -m "feat(notes): Dead/Test-only/Packages index notes"
 // overview renders Overview.md: provenance callout (incl. Last validated + commit date),
 // size, reachability (+ mermaid pie, + caution callout if dead>0), surface + entry-point
 // links, hotspots (mermaid pie of call concentration + ranked [[link]] lists), graph-view
-// recipe (+ optional Advanced-URI one-click link), fidelity in plain English, refusal
+// recipe (+ optional Advanced-URI one-click link), a jargon-free edge-precision note, refusal
 // callouts. Deterministic except opts.Validated.
 func overview(g contract.Graph, dead, testOnly contract.Note, m Metrics, opts Options) string
 ```
@@ -485,7 +485,7 @@ func TestOverview(t *testing.T) {
 		"Last validated", "2026-07-24 14:06 EDT",
 		"abc123",                  // tree
 		"```mermaid", "pie",       // a mermaid pie is present
-		"RTA call graph",          // fidelity in plain English
+		"approximated",            // jargon-free edge-precision note (must NOT contain "fidelity" or "RTA")
 		"⌘/Ctrl", `path:"ex/nodes"`, // graph-view recipe
 		"[[sub/B]]",               // a hotspot link (module-relative wikiTarget)
 	} {
@@ -509,7 +509,7 @@ func TestOverviewRefusalCallout(t *testing.T) {
 Run: `go test ./internal/notes/ -run TestOverview`
 Expected: FAIL — undefined.
 
-- [ ] **Step 3: Implement** `overview.go` per the spec's dashboard section: frontmatter with `magma-notes/1`; `> [!info]` provenance (repo/module, language, tree with `> [!warning]` when `-dirty`, commit date, magma version via `g.Generator`, Last validated); size table; reachability (counts + a `pie` of ProdReachable/TestOnly/Dead, `> [!caution]` if dead>0); surface (exported count, entry-point `[[links]]`); hotspots (`pie` of top-N in-degree + `(others)`, then ranked `[[link]]` lists); graph-view recipe using `opts.FolderName` (`path:"<folder>/nodes"`) and, when `opts.GraphLink != ""`, an `obsidian://advanced-uri?vault=<GraphLink>&commandid=graph%3Aopen` link; fidelity prose ("RTA call graph: direct calls exact; dynamic … approximated"); an entry-point→package **mermaid `flowchart`** (each entry point node linking to the distinct packages it transitively reaches, kept to top-level so it stays legible — dedupe edges, sort, cap at a sane number of packages and note if truncated); `> [!failure]` callouts when `!g.Computable` or a view refused. Refused graph short-circuits to provenance + failure callout. (The `TestOverview` assertion covers the pie + recipe + fidelity; add an assertion for `flowchart` presence.)
+- [ ] **Step 3: Implement** `overview.go` per the spec's dashboard section: frontmatter with `magma-notes/1`; `> [!info]` provenance (repo/module, language, tree with `> [!warning]` when `-dirty`, commit date, magma version via `g.Generator`, Last validated); size table; reachability (counts + a `pie` of ProdReachable/TestOnly/Dead, `> [!caution]` if dead>0); surface (exported count, entry-point `[[links]]`); hotspots (`pie` of top-N in-degree + `(others)`, then ranked `[[link]]` lists); graph-view recipe using `opts.FolderName` (`path:"<folder>/nodes"`) and, when `opts.GraphLink != ""`, an `obsidian://advanced-uri?vault=<GraphLink>&commandid=graph%3Aopen` link; a **jargon-free edge-precision note** — no "fidelity" or "RTA" wording — e.g. "Direct calls are exact; calls through interfaces or function values are approximated (may include paths that can't occur at runtime, but never miss a real one)."; an entry-point→package **mermaid `flowchart`** (each entry point node linking to the distinct packages it transitively reaches, kept to top-level so it stays legible — dedupe edges, sort, cap at a sane number of packages and note if truncated); `> [!failure]` callouts when `!g.Computable` or a view refused. Refused graph short-circuits to provenance + failure callout. (The `TestOverview` assertion covers the pie + recipe + fidelity; add an assertion for `flowchart` presence.)
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -613,7 +613,7 @@ git commit -m "feat(notes): Render orchestration + manifest reconcile"
 
 **Interfaces:**
 - Consumes: `notes.Render`, `notes.Reconcile`, `notes.Options`, `contract.Meta.CommitDate`, `contract.Graph.Module`.
-- Produces: on disk under `<vault>/<folder>/`: the markdown notes, `.magma/{graph,_dead,_test-only}.json`, `.magma/manifest.json`. New flags `--depth`, `--from`, `--hotspots`, `--graph-link`. Panel gains a `notes` count and plain-English fidelity.
+- Produces: on disk under `<vault>/<folder>/`: the markdown notes, `.magma/{graph,_dead,_test-only}.json`, `.magma/manifest.json`. New flags `--depth`, `--from`, `--hotspots`, `--graph-link`. Panel gains a `notes` count; the `fidelity` row is removed (constant `rta`, noise to humans; the JSON field stays for machines).
 
 - [ ] **Step 1: Write the failing test** — extend `main_test.go`:
 
@@ -694,7 +694,7 @@ Expected: FAIL — `.magma/` files absent / `runOpts` undefined.
   4. On fresh-skip: read `.magma/graph.json`, re-render **only** `Overview.md` (via `notes.Render` on the parsed graph, keep just that file) with a fresh `Validated`, write it, print the "already fresh" panel.
   5. Build path: write `.magma/{graph,_dead,_test-only}.json` (existing writers, new dir); call `notes.Render(g, dead, testOnly, opts)`; write each file (creating parent dirs); read prior `.magma/manifest.json` (if any), `notes.Reconcile`, delete stale files; write new `manifest.json`. Guard every write path stays within `out` (reject symlink/escape).
   6. `Options.Validated` = `time.Now().Format("2006-01-02 15:04 MST")` (the only clock; lives in `main`). `Options.CommitDate` = `meta.CommitDate`. `Options.GraphLink` from the flag.
-  7. Panel: add a `notes` row (len(files)); change the fidelity row to `RTA call graph` with a footnote (`RTA: static calls exact, dynamic (interface / func-value) approximated`).
+  7. Panel: add a `notes` row (len(files)); **REMOVE the `fidelity` row entirely** — it is a constant `rta` today and is noise to a human. (The `fidelity` field stays in the JSON contract for the gate + future backends; it is just not shown in the terminal panel.)
 
 - [ ] **Step 4: Run to verify it passes**
 
