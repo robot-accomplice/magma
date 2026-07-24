@@ -37,29 +37,77 @@ import (
 const version = "0.1.0"
 
 func main() {
-	force, pos := parseArgs(os.Args[1:])
-	if len(pos) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: magma [--force] <repo-path> <name> <output-root>")
+	opt := parseArgs(os.Args[1:])
+	switch {
+	case opt.help:
+		fmt.Print(usageText()) // asked-for help goes to stdout, exit 0
+		return
+	case opt.version:
+		fmt.Println("magma " + version)
+		return
+	case len(opt.pos) != 3:
+		fmt.Fprint(os.Stderr, usageText()) // misuse goes to stderr, exit 2
 		os.Exit(2)
 	}
-	if err := run(pos[0], pos[1], pos[2], force); err != nil {
+	if err := run(opt.pos[0], opt.pos[1], opt.pos[2], opt.force); err != nil {
 		fmt.Fprintln(os.Stderr, "magma: "+err.Error())
 		os.Exit(1)
 	}
 }
 
-// parseArgs splits an optional --force/-f flag from the three positional args.
-// Freshness skipping is the default; --force rebuilds an already-fresh map.
-func parseArgs(args []string) (force bool, pos []string) {
+// options is the parsed command line: the flags plus the leftover positionals.
+type options struct {
+	force   bool
+	help    bool
+	version bool
+	pos     []string
+}
+
+// parseArgs splits the flags (--force/-f, --help/-h, --version/-V) from the three
+// positional args, accepting flags in any position. Freshness skipping is the
+// default; --force rebuilds an already-fresh map.
+func parseArgs(args []string) options {
+	var o options
 	for _, a := range args {
 		switch a {
 		case "--force", "-f":
-			force = true
+			o.force = true
+		case "--help", "-h":
+			o.help = true
+		case "--version", "-V":
+			o.version = true
 		default:
-			pos = append(pos, a)
+			o.pos = append(o.pos, a)
 		}
 	}
-	return force, pos
+	return o
+}
+
+// usageText is the help/usage screen: what magma is, what each argument means
+// (not just its name), the flags, and a runnable example.
+func usageText() string {
+	return "magma " + version + " — deterministic call-graph & reachability mapper (Go)\n\n" +
+		"Extracts a repository's call graph (functions/methods = nodes, calls = edges) and\n" +
+		"derives reachability views (dead code, test-only code). Deterministic and LLM-free:\n" +
+		"same repo + SHA → same graph. Skips the rebuild when a fresh map already exists.\n\n" +
+		"USAGE:\n" +
+		"  magma [--force] <repo-path> <name> <output-root>\n\n" +
+		"ARGUMENTS:\n" +
+		"  <repo-path>     path to the Git repository to analyze (language is auto-detected;\n" +
+		"                  v" + version + " supports Go — others are refused honestly)\n" +
+		"  <name>          a label for this map, and the subdirectory it is written to under\n" +
+		"                  <output-root>. Must be a single path component (no '/', '\\', '.', '..')\n" +
+		"  <output-root>   directory the map is written under, as <output-root>/<name>/,\n" +
+		"                  producing graph.json, _dead.json and _test-only.json\n\n" +
+		"FLAGS:\n" +
+		"  -f, --force     rebuild even when a fresh map already exists for this commit\n" +
+		"  -h, --help      show this help and exit\n" +
+		"  -V, --version   print the version and exit\n\n" +
+		"EXAMPLE:\n" +
+		"  magma ~/code/roboticus roboticus ~/maps\n" +
+		"  # writes ~/maps/roboticus/{graph.json,_dead.json,_test-only.json}\n\n" +
+		"Re-run at an audit's frozen HEAD; a 'tree' ending in '-dirty' means the working tree\n" +
+		"wasn't clean, so the map can't be reproduced from its SHA.\n"
 }
 
 func run(repoArg, name, outRoot string, force bool) error {

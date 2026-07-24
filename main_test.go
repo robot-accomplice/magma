@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/robot-accomplice/magma/internal/contract"
@@ -86,31 +87,60 @@ func TestRunUnknownLanguageRefuses(t *testing.T) {
 	}
 }
 
-// parseArgs pulls an optional --force/-f flag out of the positional args, in any
-// position, and reports the rest verbatim.
+// parseArgs pulls the optional flags (--force, --help, --version) out of the args
+// in any position and reports the positionals verbatim.
 func TestParseArgs(t *testing.T) {
 	cases := []struct {
-		args      []string
-		wantForce bool
-		wantPos   []string
+		args    []string
+		force   bool
+		help    bool
+		version bool
+		pos     []string
 	}{
-		{[]string{"repo", "name", "out"}, false, []string{"repo", "name", "out"}},
-		{[]string{"--force", "repo", "name", "out"}, true, []string{"repo", "name", "out"}},
-		{[]string{"repo", "name", "out", "-f"}, true, []string{"repo", "name", "out"}},
-		{nil, false, nil},
+		{args: []string{"repo", "name", "out"}, pos: []string{"repo", "name", "out"}},
+		{args: []string{"--force", "repo", "name", "out"}, force: true, pos: []string{"repo", "name", "out"}},
+		{args: []string{"repo", "name", "out", "-f"}, force: true, pos: []string{"repo", "name", "out"}},
+		{args: []string{"-h"}, help: true},
+		{args: []string{"--help"}, help: true},
+		{args: []string{"--version"}, version: true},
+		{args: []string{"-V"}, version: true},
+		{args: nil},
 	}
 	for _, c := range cases {
-		force, pos := parseArgs(c.args)
-		if force != c.wantForce {
-			t.Errorf("parseArgs(%v) force = %v, want %v", c.args, force, c.wantForce)
+		o := parseArgs(c.args)
+		if o.force != c.force || o.help != c.help || o.version != c.version {
+			t.Errorf("parseArgs(%v) = {force:%v help:%v version:%v}, want {force:%v help:%v version:%v}",
+				c.args, o.force, o.help, o.version, c.force, c.help, c.version)
 		}
-		if len(pos) != len(c.wantPos) {
-			t.Fatalf("parseArgs(%v) pos = %v, want %v", c.args, pos, c.wantPos)
+		if len(o.pos) != len(c.pos) {
+			t.Fatalf("parseArgs(%v) pos = %v, want %v", c.args, o.pos, c.pos)
 		}
-		for i := range c.wantPos {
-			if pos[i] != c.wantPos[i] {
-				t.Errorf("parseArgs(%v) pos[%d] = %q, want %q", c.args, i, pos[i], c.wantPos[i])
+		for i := range c.pos {
+			if o.pos[i] != c.pos[i] {
+				t.Errorf("parseArgs(%v) pos[%d] = %q, want %q", c.args, i, o.pos[i], c.pos[i])
 			}
+		}
+	}
+}
+
+// The usage screen must show the version, explain every argument (not just name
+// them), name the flags, and carry a runnable example — the gaps the minimal
+// version left.
+func TestUsageTextIsInformative(t *testing.T) {
+	u := usageText()
+	for _, want := range []string{
+		version,       // what version am I running
+		"<repo-path>", // the args, named
+		"<name>",
+		"<output-root>",
+		"subdirectory", // <name> explained, not just named
+		"written",      // <output-root> explained
+		"--force", "--help", "--version",
+		"EXAMPLE",    // a runnable example
+		"graph.json", // what it produces
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("usage text missing %q", want)
 		}
 	}
 }
