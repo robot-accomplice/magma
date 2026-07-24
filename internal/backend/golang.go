@@ -3,6 +3,7 @@ package backend
 import (
 	"fmt"
 	"go/ast"
+	"go/doc"
 	"go/token"
 	"go/types"
 	"os"
@@ -180,6 +181,7 @@ func collectNodes(
 	type decl struct {
 		fn  *ssa.Function
 		obj *types.Func
+		doc string
 	}
 	var decls []decl
 	seen := make(map[token.Position]bool)
@@ -210,7 +212,7 @@ func collectNodes(
 					continue // a test variant of an already-seen declaration
 				}
 				seen[posn] = true
-				decls = append(decls, decl{fn, obj})
+				decls = append(decls, decl{fn: fn, obj: obj, doc: doc.Synopsis(fd.Doc.Text())})
 			}
 		}
 	})
@@ -237,6 +239,8 @@ func collectNodes(
 			Generated:     generated[posn.Filename],
 			Reachable:     reachAll[posn],
 			ProdReachable: reachProd[posn],
+			Signature:     signatureOf(d.fn.Signature),
+			Doc:           d.doc,
 		})
 		posnID[posn] = i
 	}
@@ -309,6 +313,33 @@ func prettyName(fn *ssa.Function) string {
 		}
 	}
 	return name
+}
+
+// typeQualifier renders package-qualified types as "pkg.Name" (short package
+// name), matching prettyName's receiver rendering — never the full import path.
+func typeQualifier(p *types.Package) string { return p.Name() }
+
+// signatureOf renders a types.Signature into the contract's Param/Result form.
+// Parameter names are kept; result names are dropped (the type is the signal).
+func signatureOf(sig *types.Signature) *contract.Signature {
+	out := &contract.Signature{Params: []contract.Param{}, Results: []contract.Result{}}
+	if params := sig.Params(); params != nil {
+		for i := 0; i < params.Len(); i++ {
+			v := params.At(i)
+			out.Params = append(out.Params, contract.Param{
+				Name: v.Name(),
+				Type: types.TypeString(v.Type(), typeQualifier),
+			})
+		}
+	}
+	if results := sig.Results(); results != nil {
+		for i := 0; i < results.Len(); i++ {
+			out.Results = append(out.Results, contract.Result{
+				Type: types.TypeString(results.At(i).Type(), typeQualifier),
+			})
+		}
+	}
+	return out
 }
 
 // moduledPath returns the main module's import path from the loaded packages,
