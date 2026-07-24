@@ -32,6 +32,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/robot-accomplice/magma/internal/architext"
 	"github.com/robot-accomplice/magma/internal/backend"
 	"github.com/robot-accomplice/magma/internal/contract"
 	"github.com/robot-accomplice/magma/internal/detect"
@@ -66,11 +67,13 @@ func main() {
 	}
 
 	ro := runOpts{
-		force:     opt.force,
-		depth:     opt.depth,
-		hotspots:  opt.hotspots,
-		from:      opt.from,
-		graphLink: graphLink,
+		force:        opt.force,
+		depth:        opt.depth,
+		hotspots:     opt.hotspots,
+		from:         opt.from,
+		graphLink:    graphLink,
+		architext:    opt.architext,
+		architextDir: opt.architextDir,
 	}
 	if err := run(opt.pos[0], opt.pos[1], opt.pos[2], ro); err != nil {
 		fmt.Fprintln(os.Stderr, "magma: "+err.Error())
@@ -88,6 +91,8 @@ type options struct {
 	from         string
 	graphLink    string
 	graphLinkSet bool // true once --graph-link is seen, with or without a value
+	architext    bool
+	architextDir string // "" => default: <repo>/docs/architext/data
 	pos          []string
 }
 
@@ -95,11 +100,13 @@ type options struct {
 // down to run's own vocabulary — main resolves the --graph-link default before
 // this is built, so run always sees a plain vault name or "").
 type runOpts struct {
-	force     bool
-	depth     int
-	hotspots  int
-	from      string
-	graphLink string
+	force        bool
+	depth        int
+	hotspots     int
+	from         string
+	graphLink    string
+	architext    bool
+	architextDir string // "" => default: <repo>/docs/architext/data
 }
 
 // parseArgs splits the flags from the three positional args, accepting flags in
@@ -134,6 +141,11 @@ func parseArgs(args []string) options {
 		case strings.HasPrefix(a, "--graph-link="):
 			o.graphLinkSet = true
 			o.graphLink = strings.TrimPrefix(a, "--graph-link=")
+		case a == "--architext":
+			o.architext = true
+		case strings.HasPrefix(a, "--architext="):
+			o.architext = true
+			o.architextDir = strings.TrimPrefix(a, "--architext=")
 		default:
 			o.pos = append(o.pos, a)
 		}
@@ -169,6 +181,7 @@ func usageText() string {
 		"                         add a one-click Obsidian graph-view link to Overview.md\n" +
 		"                         (requires the Advanced URI plugin); VAULT defaults to the\n" +
 		"                         vault-path's own folder name\n" +
+		"      --architext[=DIR]  also emit docs/architext/data/code-graph.json (default: <repo>/docs/architext/data)\n" +
 		"  -h, --help             show this help and exit\n" +
 		"  -V, --version          print the version and exit\n\n" +
 		"EXAMPLE:\n" +
@@ -225,7 +238,7 @@ func run(repoArg, name, outRoot string, opts runOpts) error {
 	// Building the map is the expensive step, so skip it when a current one is
 	// already on disk — magma is meant to be run before every audit/code task and
 	// must be near-free when nothing changed. --force overrides.
-	if !opts.force && isFresh(out, meta) {
+	if !opts.force && isFresh(out, meta, opts.architext) {
 		return refreshOverview(out, dataDir, name, meta, nopts)
 	}
 
@@ -235,7 +248,7 @@ func run(repoArg, name, outRoot string, opts runOpts) error {
 		// Still emit the (refused) artifacts and the panel, but exit non-zero so
 		// the audit gate and shells see the refusal.
 		g := refusedGraph(meta, lang)
-		if err := emitReport(out, dataDir, meta, name, g, nopts); err != nil {
+		if err := emitReport(out, dataDir, repo, meta, name, g, nopts, opts); err != nil {
 			return err
 		}
 		return fmt.Errorf("%s", g.NotComputableReason)
@@ -247,7 +260,7 @@ func run(repoArg, name, outRoot string, opts runOpts) error {
 	if err != nil {
 		return err
 	}
-	return emitReport(out, dataDir, meta, name, g, nopts)
+	return emitReport(out, dataDir, repo, meta, name, g, nopts, opts)
 }
 
 // isFresh reports whether a complete, current map already exists at out — the
@@ -262,7 +275,10 @@ func run(repoArg, name, outRoot string, opts runOpts) error {
 // wiped notes set) and must be rebuilt, not silently accepted as current. A
 // stored graph that was refused (Computable=false) is never fresh either — a
 // refusal must always re-attempt, never be silently repeated as "already fresh".
-func isFresh(out string, meta contract.Meta) bool {
+// wantArchitext additionally requires the vault's code-graph.json mirror to be
+// present — a map built before --architext was requested must rebuild to
+// produce it, not be silently accepted as covering it.
+func isFresh(out string, meta contract.Meta, wantArchitext bool) bool {
 	if strings.HasSuffix(meta.Tree, "-dirty") {
 		return false
 	}
@@ -298,6 +314,12 @@ func isFresh(out string, meta contract.Meta) bool {
 	for _, p := range manifest {
 		if _, err := os.Stat(filepath.Join(out, p)); err != nil {
 			return false
+		}
+	}
+
+	if wantArchitext {
+		if _, err := os.Stat(filepath.Join(dataDir, architext.FileName)); err != nil {
+			return false // architext requested but its artifact is missing -> rebuild
 		}
 	}
 	return true
@@ -351,12 +373,29 @@ func refusedGraph(meta contract.Meta, lang detect.Lang) contract.Graph {
 }
 
 // emitReport writes the JSON artifacts (hidden under dataDir) and the Obsidian
-// markdown notes (under out), reconciles stale notes from the prior run, and
-// prints the styled panel to stdout.
-func emitReport(out, dataDir string, meta contract.Meta, name string, g contract.Graph, nopts notes.Options) error {
+// markdown notes (under out), optionally dual-writes the architext code-graph,
+// reconciles stale notes from the prior run, and prints the styled panel to
+// stdout. It is the single point both the refused-language and the computed
+// paths in run reach, so the architext emission below runs for both — an
+// honest refused code-graph is required, mirroring how the other refused
+// artifacts (graph.json, _dead.json, ...) are always written.
+func emitReport(out, dataDir, repo string, meta contract.Meta, name string, g contract.Graph, nopts notes.Options, opts runOpts) error {
 	dead, testOnly, err := writeArtifacts(dataDir, meta, g)
 	if err != nil {
 		return err
+	}
+	if opts.architext {
+		archDir := opts.architextDir
+		if archDir == "" {
+			archDir = filepath.Join(repo, "docs", "architext", "data")
+		}
+		cg := architext.Emit(g)
+		if err := architext.Write(cg,
+			filepath.Join(archDir, architext.FileName),
+			filepath.Join(dataDir, architext.FileName),
+		); err != nil {
+			return fmt.Errorf("writing architext code-graph: %w", err)
+		}
 	}
 	files, manifest := notes.Render(g, dead, testOnly, nopts)
 	if err := writeNotes(out, dataDir, files, manifest); err != nil {
