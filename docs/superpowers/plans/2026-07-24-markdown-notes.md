@@ -439,7 +439,7 @@ func TestIndexNotes(t *testing.T) {
 Run: `go test ./internal/notes/ -run TestIndexNotes`
 Expected: FAIL — undefined.
 
-- [ ] **Step 3: Implement** `index.go`. Each index opens with a one-line explanation + the "every row is a candidate, not a finding" caveat. For a row, find its node by `(file,line)`; if `selected`, emit `- [[wikiTarget]]`; else `- \`file:line\` symbol`. `packagesIndex` groups selected nodes by `relPkg`, sorted, each package a `##` heading with its function `[[links]]`.
+- [ ] **Step 3: Implement** `index.go`. **`deadIndex` and `testOnlyIndex`** each open with a one-line explanation of the class + the "every row is a candidate, not a finding" caveat (they ARE candidate lists). For a row, find its node by `(file,line)`; if `selected`, emit `- [[wikiTarget]]`; else `- \`file:line\` symbol`. **`packagesIndex`** is a navigation index, NOT a candidate list, so it opens with a plain one-line explanation and does NOT carry the candidate caveat; it groups selected nodes by `relPkg`, sorted, each package a `##` heading with its function `[[links]]`.
 
 - [ ] **Step 4: Run to verify it passes**
 
