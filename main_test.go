@@ -87,6 +87,23 @@ func TestRunUnknownLanguageRefuses(t *testing.T) {
 	}
 }
 
+// A refused map (Computable=false) must never be reported as "already fresh" on
+// a second run — isFresh's tree/generator/manifest checks all match for a
+// stored refusal, but a refusal must always re-attempt, so run must keep
+// returning a non-nil error every time, not silently succeed on rerun.
+func TestRunRefusalIsNeverFresh(t *testing.T) {
+	repo := gitRepo(t, map[string]string{"README.md": "x\n"})
+	outRoot := t.TempDir()
+
+	if err := run(repo, "proj", outRoot, runOpts{}); err == nil {
+		t.Fatal("first run on an unsupported-language repo must return an error")
+	}
+
+	if err := run(repo, "proj", outRoot, runOpts{}); err == nil {
+		t.Error("second run must re-attempt and refuse again, not report 'already fresh'")
+	}
+}
+
 // run must write the Obsidian markdown map alongside the JSON, and the JSON
 // must live under the hidden .magma/ subfolder, not the folder root.
 func TestRunWritesVaultAndHiddenJSON(t *testing.T) {
@@ -399,9 +416,11 @@ func TestIsFresh(t *testing.T) {
 		omitGraph    bool
 		omitManifest bool
 		omitMarkdown bool
+		storeRefused bool
 		wantFresh    bool
 	}{
 		{name: "matching clean tree and generator", storeTree: "abc123", storeGen: gen, metaTree: "abc123", metaGen: gen, wantFresh: true},
+		{name: "refused stored graph is never fresh, even with matching tree/generator", storeTree: "abc123", storeGen: gen, metaTree: "abc123", metaGen: gen, storeRefused: true, wantFresh: false},
 		{name: "stale sha", storeTree: "old999", storeGen: gen, metaTree: "abc123", metaGen: gen, wantFresh: false},
 		{name: "dirty current tree is never fresh", storeTree: "abc123-dirty", storeGen: gen, metaTree: "abc123-dirty", metaGen: gen, wantFresh: false},
 		{name: "generator (version) bump forces rebuild", storeTree: "abc123", storeGen: "magma/0.0.9", metaTree: "abc123", metaGen: gen, wantFresh: false},
@@ -419,7 +438,7 @@ func TestIsFresh(t *testing.T) {
 			}
 			if !c.omitGraph {
 				writeJSONFile(t, filepath.Join(dataDir, "graph.json"),
-					map[string]any{"tree": c.storeTree, "generator": c.storeGen})
+					map[string]any{"tree": c.storeTree, "generator": c.storeGen, "computable": !c.storeRefused})
 			}
 			writeJSONFile(t, filepath.Join(dataDir, "_dead.json"), map[string]any{"tree": c.storeTree})
 			if !c.omitView {
