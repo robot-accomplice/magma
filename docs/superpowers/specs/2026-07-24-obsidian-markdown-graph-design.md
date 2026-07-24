@@ -69,13 +69,24 @@ none invented. Sections:
 3. **Reachability** — reachable / production-reachable / dead / test-only counts,
    each linking to its index note. A `> [!caution]` callout if dead > 0.
 4. **Surface** — exported function count; entry points (each `main` linked to its note).
-5. **Hotspots** — top-N most-called functions (in-degree) and top-N most-calling
-   (out-degree), as tables of `[[links]]`. This is a "things the graph can tell us"
-   metric that reading cannot cheaply produce.
-6. **Fidelity, explained** — plain English: "Edges are an **RTA call graph**: direct
+5. **Hotspots / heat** — a native **mermaid `pie`** chart showing call concentration:
+   the top-N most-called functions (by in-degree) as slices plus an `(others)` slice
+   for the remaining inbound calls, so a reader instantly sees whether a few functions
+   absorb most of the graph's calls. Because mermaid slices aren't clickable, it is
+   paired with compact ranked lists (most-called by in-degree, most-calling by
+   out-degree) of `[[links]]` + counts for navigation. `N` is configurable via
+   `--hotspots N` (default 10). This is a "things the graph can tell us" metric that
+   reading cannot cheaply produce. (The reachability composition in §3 can likewise be
+   a mermaid pie.)
+6. **Graph view** — always a recipe (works in core Obsidian): "open the graph
+   (⌘/Ctrl-G) and paste this filter to scope it to this map: `path:"<folder-name>/nodes"`"
+   (a substring match, robust to where the vault root sits). When `--graph-link` is
+   passed, additionally emit a one-click `obsidian://…graph:open` deep link (requires
+   the Advanced URI plugin; omitted by default since a dead link is worse than none).
+7. **Fidelity, explained** — plain English: "Edges are an **RTA call graph**: direct
    calls are exact; dynamic calls through interfaces or function values are
    approximated." Resolves the "`rta` is opaque" problem.
-7. **Refusals** — if the graph or a view refused, a `> [!failure]` callout with the
+8. **Refusals** — if the graph or a view refused, a `> [!failure]` callout with the
    reason (never a silent empty).
 
 A small mermaid graph shows entry points → the packages they reach (top level only,
@@ -170,7 +181,9 @@ deterministic JSON (`tree` + `generator`), so the timestamp never affects skip l
 
 ## CLI / report changes
 
-- New flags `--depth N`, `--from <symbol>` (help text + README updated).
+- New flags: `--depth N`, `--from <symbol>` (walk narrowing), `--hotspots N`
+  (dashboard hotspot count, default 10), `--graph-link` (emit the one-click
+  Advanced-URI graph link). Help text + README updated.
 - The terminal panel gains a `notes` count and de-jargons fidelity to
   `RTA call graph` with the one-line explanation as a footnote.
 
