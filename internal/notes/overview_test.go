@@ -23,14 +23,15 @@ func TestOverview(t *testing.T) {
 		"[[sub/B]]",           // a hotspot link (module-relative wikiTarget)
 		`e_main["main"]`,      // flowchart uses bracket-label node form: id["label"]
 		"magma/project/",      // per-project tag present (Overview frontmatter)
-		"tag:#magma/project/", // graph-filter tip leads with the tag filter
+		"tag:#magma/project/", // backticked paste-string, for the graph filter box
+		"Click this tag to list every note in this project: #magma/project/ex", // BARE tag: Obsidian only renders an unbacktick "#tag" as clickable
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview missing %q in:\n%s", want, out)
 		}
 	}
 	// No jargon: "fidelity" and "RTA" must never leak into the reader-facing note.
-	for _, unwanted := range []string{"fidelity", "RTA", "(others)", `"main" -->`} {
+	for _, unwanted := range []string{"fidelity", "RTA", "(others)", `"main" -->`, "`#magma/project/"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("overview must not contain %q in:\n%s", unwanted, out)
 		}

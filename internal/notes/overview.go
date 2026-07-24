@@ -221,15 +221,18 @@ func nonZeroPie(slices []pieSlice) string {
 // graphFilterTip renders a prominent `> [!tip]` callout — placed right after
 // Provenance, before any other section, so the per-project graph filter is
 // the first actionable thing a reader sees rather than buried at the bottom.
-// Leads with the per-project tag filter (isolates this project alone in a
-// vault holding several maps + other wiki notes), with the path filter as a
-// fallback, plus an optional Advanced-URI one-click link.
+// The first line carries the tag BARE (no backticks/code formatting): Obsidian
+// only renders a bare "#tag" as a live, clickable tag that opens search — a
+// backticked or code-fenced tag is inert text. The second line repeats the
+// tag inside a backticked `tag:#...` paste-string for the graph-view filter
+// box (which needs the "tag:" prefix, unlike the clickable form), with the
+// path filter as a fallback, plus an optional Advanced-URI one-click link.
 func graphFilterTip(opts Options) string {
+	tag := projectTag(opts.FolderName)
 	var b strings.Builder
 	b.WriteString("> [!tip] See just this project's graph\n")
-	b.WriteString("> In the graph view (⌘/Ctrl-G), filter to this project alone with the tag:\n")
-	fmt.Fprintf(&b, "> `tag:#%s`\n", projectTag(opts.FolderName))
-	fmt.Fprintf(&b, "> (or `path:\"%s/nodes\"`). This isolates this project's call graph from everything else in the vault.\n", opts.FolderName)
+	fmt.Fprintf(&b, "> Click this tag to list every note in this project: #%s\n", tag)
+	fmt.Fprintf(&b, "> To scope the graph view (⌘/Ctrl-G), paste into the graph filter: `tag:#%s` (or `path:\"%s/nodes\"`).\n", tag, opts.FolderName)
 	if opts.GraphLink != "" {
 		fmt.Fprintf(&b, "\n[One-click open](obsidian://advanced-uri?vault=%s&commandid=graph%%3Aopen)\n", opts.GraphLink)
 	}
