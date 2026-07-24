@@ -2,7 +2,6 @@ package notes
 
 import (
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 
@@ -55,10 +54,9 @@ func functionNote(n contract.Node, callees []contract.Edge, byID map[int]contrac
 // calleeLinks resolves n's outgoing edges to deduped [[target]] link strings,
 // sorted by target. Multiple edges to the same callee are aggregated: the
 // target is annotated " (dynamic)" only when every edge reaching it is
-// dynamic (no static resolution exists).
+// dynamic (no static resolution exists). Targets are module-relative, via
+// wikiTarget, matching notePath so [[...]] links resolve to the callee's note.
 func calleeLinks(callees []contract.Edge, byID map[int]contract.Node, module string) []string {
-	_ = module // see function_test.go / task-6-report.md: target uses the callee's full pkg+symbol, not module-relative wikiTarget
-
 	type agg struct {
 		anyStatic  bool
 		anyDynamic bool
@@ -70,7 +68,7 @@ func calleeLinks(callees []contract.Edge, byID map[int]contract.Node, module str
 		if !ok {
 			continue
 		}
-		target := path.Join(callee.Pkg, callee.Symbol)
+		target := wikiTarget(callee, module)
 		a, ok := byTarget[target]
 		if !ok {
 			a = &agg{}
