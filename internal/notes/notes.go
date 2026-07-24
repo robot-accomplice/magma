@@ -73,7 +73,7 @@ func Render(g contract.Graph, dead, testOnly contract.Note, opts Options) (files
 					out = append(out, e)
 				}
 			}
-			files[notePath(n, g.Module)] = functionNote(n, out, byID, g.Module)
+			files[notePath(n, g.Module)] = functionNote(n, out, byID, g.Module, opts.FolderName)
 		}
 	}
 

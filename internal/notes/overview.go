@@ -17,22 +17,25 @@ const defaultHotspots = 10
 const maxFlowchartPackages = 20
 
 // overview renders Overview.md: provenance callout (incl. Last validated + commit
-// date), size, reachability (+ mermaid pie, + caution callout if dead>0), surface +
-// entry-point links, hotspots (mermaid pie of call concentration + ranked [[link]]
-// lists), an entry-point->package mermaid flowchart, a graph-view recipe (+
-// optional Advanced-URI one-click link), a jargon-free note on what a call edge
-// means, and refusal callouts. Deterministic except opts.Validated
-// (caller-supplied wall clock).
+// date), a prominent graph-filter tip (per-project tag, path fallback, optional
+// Advanced-URI one-click link), size, reachability (+ mermaid pie, + caution
+// callout if dead>0), surface + entry-point links, hotspots (mermaid pie of call
+// concentration + ranked [[link]] lists), an entry-point->package mermaid
+// flowchart, a jargon-free note on what a call edge means, and refusal callouts.
+// Deterministic except opts.Validated (caller-supplied wall clock).
 func overview(g contract.Graph, dead, testOnly contract.Note, m Metrics, opts Options) string {
 	var b strings.Builder
 
-	b.WriteString(overviewFrontmatter())
+	b.WriteString(overviewFrontmatter(opts.FolderName))
 	b.WriteString(provenanceCallout(g, opts))
 
 	if !g.Computable {
 		fmt.Fprintf(&b, "\n> [!failure] Not computable\n> %s\n", g.NotComputableReason)
 		return b.String()
 	}
+
+	b.WriteString("\n")
+	b.WriteString(graphFilterTip(opts))
 
 	b.WriteString("\n## Size\n\n")
 	b.WriteString(sizeTable(m))
@@ -49,9 +52,6 @@ func overview(g contract.Graph, dead, testOnly contract.Note, m Metrics, opts Op
 	b.WriteString("\n## Entry points -> packages\n\n")
 	b.WriteString(entryPackageFlowchart(g, m.EntryPoints))
 
-	b.WriteString("\n## Graph view\n\n")
-	b.WriteString(graphViewRecipe(opts))
-
 	b.WriteString("\n## Reading the edges\n\n")
 	b.WriteString(edgeNote())
 
@@ -59,11 +59,13 @@ func overview(g contract.Graph, dead, testOnly contract.Note, m Metrics, opts Op
 }
 
 // overviewFrontmatter is the YAML header, versioned so future note formats can
-// tell an old Overview.md apart from a new one.
-func overviewFrontmatter() string {
+// tell an old Overview.md apart from a new one. Carries the same per-project
+// tag (projectTag) stamped on every function note, so the Overview itself is
+// included when a reader filters the graph to one project.
+func overviewFrontmatter(folderName string) string {
 	return "---\n" +
 		"magma_notes: magma-notes/1\n" +
-		"tags: [magma/overview]\n" +
+		"tags: [magma/overview, " + projectTag(folderName) + "]\n" +
 		"---\n\n"
 }
 
@@ -119,11 +121,14 @@ func reachabilitySection(m Metrics, dead, testOnly contract.Note) string {
 	fmt.Fprintf(&b, "- Dead: %d ([[Dead code]])\n", m.DeadN)
 	fmt.Fprintf(&b, "- Test-only: %d ([[Test-only code]])\n", m.TestOnlyN)
 
-	b.WriteString("\n```mermaid\npie showData\n")
-	fmt.Fprintf(&b, "  \"Prod-reachable\" : %d\n", m.ProdReachable)
-	fmt.Fprintf(&b, "  \"Test-only\" : %d\n", m.TestOnlyN)
-	fmt.Fprintf(&b, "  \"Dead\" : %d\n", m.DeadN)
-	b.WriteString("```\n")
+	if pie := nonZeroPie([]pieSlice{
+		{"Prod-reachable", m.ProdReachable},
+		{"Test-only", m.TestOnlyN},
+		{"Dead", m.DeadN},
+	}); pie != "" {
+		b.WriteString("\n")
+		b.WriteString(pie)
+	}
 
 	if m.DeadN > 0 {
 		fmt.Fprintf(&b, "\n> [!caution] %d dead function(s) detected. See [[Dead code]].\n", m.DeadN)
@@ -142,9 +147,9 @@ func surfaceSection(m Metrics, module string) string {
 	return b.String()
 }
 
-// hotspotsSection renders the top-N most-called pie (+ "(others)" slice) and
-// the ranked most-called/most-calling [[link]] lists. N is opts.Hotspots,
-// defaulting to defaultHotspots when unset.
+// hotspotsSection renders the top-N most-called pie (top-N only — no
+// "(others)" bucket) and the ranked most-called/most-calling [[link]] lists.
+// N is opts.Hotspots, defaulting to defaultHotspots when unset.
 func hotspotsSection(m Metrics, opts Options, module string) string {
 	n := opts.Hotspots
 	if n <= 0 {
@@ -160,22 +165,15 @@ func hotspotsSection(m Metrics, opts Options, module string) string {
 		mostCalling = mostCalling[:n]
 	}
 
-	shown := 0
-	for _, row := range mostCalled {
-		shown += row.Degree
-	}
-	others := m.Edges - shown
-	if others < 0 {
-		others = 0
-	}
-
 	var b strings.Builder
-	b.WriteString("```mermaid\npie showData\n")
+
+	slices := make([]pieSlice, 0, len(mostCalled))
 	for _, row := range mostCalled {
-		fmt.Fprintf(&b, "  %q : %d\n", wikiTarget(row.Node, module), row.Degree)
+		slices = append(slices, pieSlice{wikiTarget(row.Node, module), row.Degree})
 	}
-	fmt.Fprintf(&b, "  \"(others)\" : %d\n", others)
-	b.WriteString("```\n")
+	if pie := nonZeroPie(slices); pie != "" {
+		b.WriteString(pie)
+	}
 
 	b.WriteString("\n**Most called (in-degree):**\n")
 	for _, row := range mostCalled {
@@ -190,12 +188,48 @@ func hotspotsSection(m Metrics, opts Options, module string) string {
 	return b.String()
 }
 
-// graphViewRecipe renders the always-present "open the graph view and paste
-// this filter" recipe, plus an optional Advanced-URI one-click link.
-func graphViewRecipe(opts Options) string {
+// pieSlice is one labeled value in a mermaid pie chart.
+type pieSlice struct {
+	label string
+	value int
+}
+
+// nonZeroPie renders a ```mermaid pie showData``` block containing only the
+// slices with value > 0 (mermaid pies read oddly with a 0-value wedge, and a
+// reader gains nothing from one). Returns "" when no slice is positive, so
+// the caller omits the block entirely rather than rendering an empty pie.
+func nonZeroPie(slices []pieSlice) string {
 	var b strings.Builder
-	b.WriteString("Open the graph view (⌘/Ctrl-G) and paste this filter to scope it to this map:\n\n")
-	fmt.Fprintf(&b, "```\npath:\"%s/nodes\"\n```\n", opts.FolderName)
+	any := false
+	for _, s := range slices {
+		if s.value <= 0 {
+			continue
+		}
+		if !any {
+			b.WriteString("```mermaid\npie showData\n")
+			any = true
+		}
+		fmt.Fprintf(&b, "  %q : %d\n", s.label, s.value)
+	}
+	if !any {
+		return ""
+	}
+	b.WriteString("```\n")
+	return b.String()
+}
+
+// graphFilterTip renders a prominent `> [!tip]` callout — placed right after
+// Provenance, before any other section, so the per-project graph filter is
+// the first actionable thing a reader sees rather than buried at the bottom.
+// Leads with the per-project tag filter (isolates this project alone in a
+// vault holding several maps + other wiki notes), with the path filter as a
+// fallback, plus an optional Advanced-URI one-click link.
+func graphFilterTip(opts Options) string {
+	var b strings.Builder
+	b.WriteString("> [!tip] See just this project's graph\n")
+	b.WriteString("> In the graph view (⌘/Ctrl-G), filter to this project alone with the tag:\n")
+	fmt.Fprintf(&b, "> `tag:#%s`\n", projectTag(opts.FolderName))
+	fmt.Fprintf(&b, "> (or `path:\"%s/nodes\"`). This isolates this project's call graph from everything else in the vault.\n", opts.FolderName)
 	if opts.GraphLink != "" {
 		fmt.Fprintf(&b, "\n[One-click open](obsidian://advanced-uri?vault=%s&commandid=graph%%3Aopen)\n", opts.GraphLink)
 	}
@@ -210,10 +244,20 @@ func edgeNote() string {
 		"> Direct calls are exact. Calls through interfaces or function values are approximated — they may include paths that can't occur at runtime, but never miss a real one.\n"
 }
 
+// flowNode is one mermaid flowchart node: a stable, syntax-safe id plus the
+// human-readable label to display inside it (`id["label"]`).
+type flowNode struct {
+	id    string
+	label string
+}
+
 // entryPackageFlowchart renders a mermaid flowchart from each entry point to
 // the distinct packages it transitively reaches (module-relative, sorted,
 // deduped). Kept top-level (packages, not functions) and capped per entry
-// point so it stays legible even for a large graph.
+// point so it stays legible even for a large graph. Node ids are sanitized
+// ("e_"/"p_" prefix + [A-Za-z0-9_] only) since mermaid flowchart node ids
+// cannot themselves be quoted strings; the human-readable text goes in the
+// `id["label"]` bracket form instead.
 func entryPackageFlowchart(g contract.Graph, entryPoints []contract.Node) string {
 	byID := make(map[int]contract.Node, len(g.Nodes))
 	for _, n := range g.Nodes {
@@ -224,13 +268,13 @@ func entryPackageFlowchart(g contract.Graph, entryPoints []contract.Node) string
 		adj[e.From] = append(adj[e.From], e.To)
 	}
 
-	type flowEdge struct{ from, to string }
-	seen := make(map[flowEdge]bool)
+	type flowEdge struct{ src, dst flowNode }
+	seen := make(map[[2]string]bool) // keyed by (src.id, dst.id)
 	var edges []flowEdge
 	truncated := false
 
 	for _, ep := range entryPoints {
-		epLabel := wikiTarget(ep, g.Module)
+		src := flowNode{"e_" + sanitizeMermaidID(ep.Symbol), ep.Symbol}
 
 		visited := map[int]bool{ep.ID: true}
 		queue := []int{ep.ID}
@@ -261,33 +305,53 @@ func entryPackageFlowchart(g contract.Graph, entryPoints []contract.Node) string
 		}
 
 		for _, p := range pkgs {
-			label := p
-			if label == "" {
-				label = "(root)"
+			idBase, label := p, p
+			if p == "" {
+				idBase, label = "root", "(root)"
 			}
-			fe := flowEdge{epLabel, label}
-			if !seen[fe] {
-				seen[fe] = true
-				edges = append(edges, fe)
+			dst := flowNode{"p_" + sanitizeMermaidID(idBase), label}
+
+			key := [2]string{src.id, dst.id}
+			if !seen[key] {
+				seen[key] = true
+				edges = append(edges, flowEdge{src, dst})
 			}
 		}
 	}
 
 	sort.Slice(edges, func(i, j int) bool {
-		if edges[i].from != edges[j].from {
-			return edges[i].from < edges[j].from
+		if edges[i].src.id != edges[j].src.id {
+			return edges[i].src.id < edges[j].src.id
 		}
-		return edges[i].to < edges[j].to
+		return edges[i].dst.id < edges[j].dst.id
 	})
 
 	var b strings.Builder
-	b.WriteString("```mermaid\nflowchart LR\n")
-	for _, e := range edges {
-		fmt.Fprintf(&b, "  %q --> %q\n", e.from, e.to)
+	if len(edges) > 0 {
+		b.WriteString("```mermaid\nflowchart LR\n")
+		for _, e := range edges {
+			fmt.Fprintf(&b, "  %s[%q] --> %s[%q]\n", e.src.id, e.src.label, e.dst.id, e.dst.label)
+		}
+		b.WriteString("```\n")
 	}
-	b.WriteString("```\n")
 	if truncated {
 		b.WriteString("\n_(truncated: some entry points reach more packages than shown)_\n")
+	}
+	return b.String()
+}
+
+// sanitizeMermaidID replaces every character not safe in a mermaid flowchart
+// node id ([A-Za-z0-9_]) with "_", so a symbol or package name containing
+// slashes, dots, or other punctuation can never break the diagram.
+func sanitizeMermaidID(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
 	}
 	return b.String()
 }

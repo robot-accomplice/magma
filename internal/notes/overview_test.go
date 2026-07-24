@@ -20,17 +20,32 @@ func TestOverview(t *testing.T) {
 		"flowchart",                 // entry-point -> package mermaid flowchart
 		"approximated",              // edge-precision note, jargon-free
 		"⌘/Ctrl", `path:"ex/nodes"`, // graph-view recipe
-		"[[sub/B]]", // a hotspot link (module-relative wikiTarget)
+		"[[sub/B]]",           // a hotspot link (module-relative wikiTarget)
+		`e_main["main"]`,      // flowchart uses bracket-label node form: id["label"]
+		"magma/project/",      // per-project tag present (Overview frontmatter)
+		"tag:#magma/project/", // graph-filter tip leads with the tag filter
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("overview missing %q in:\n%s", want, out)
 		}
 	}
 	// No jargon: "fidelity" and "RTA" must never leak into the reader-facing note.
-	for _, unwanted := range []string{"fidelity", "RTA"} {
+	for _, unwanted := range []string{"fidelity", "RTA", "(others)", `"main" -->`} {
 		if strings.Contains(out, unwanted) {
-			t.Errorf("overview must not contain jargon %q in:\n%s", unwanted, out)
+			t.Errorf("overview must not contain %q in:\n%s", unwanted, out)
 		}
+	}
+	// No zero-valued pie slice should ever be emitted (fixture's Test-only
+	// count is 0, so the reachability pie must omit that slice entirely).
+	if strings.Contains(out, `" : 0`) {
+		t.Errorf("overview must not emit a zero-valued pie slice in:\n%s", out)
+	}
+	// The graph-filter tip must be prominent: it appears right after
+	// Provenance, before the Size section, not buried at the bottom.
+	tipIdx := strings.Index(out, "[!tip]")
+	sizeIdx := strings.Index(out, "## Size")
+	if tipIdx == -1 || sizeIdx == -1 || tipIdx > sizeIdx {
+		t.Errorf("graph-filter [!tip] callout must appear before ## Size:\n%s", out)
 	}
 }
 
