@@ -1,0 +1,8 @@
+# build output
+/magma
+/dist/
+*.out
+cover.out
+
+# scratch
+/tmp/
