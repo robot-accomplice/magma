@@ -1224,6 +1224,168 @@ git add -A && git commit -m "chore: coverage top-up + clean-code/clean-architect
 
 ---
 
+### Task 10: Exclude magma's own artifact from the dirty-tree check
+
+**Added from the Task 9 determinism finding (user decision: option A).** Writing `code-graph.json` into the target repo makes `git status --porcelain` report an untracked file, so the NEXT run stamps `tree: "<sha>-dirty"` — flipping the (otherwise deterministic) envelope and defeating freshness-skip for `--architext` runs. Fix: magma excludes its own generated artifact path from the dirtiness determination, so the tree stamp is independent of whether the artifact exists/changed. Verified `git status --porcelain -- . ':(exclude)<path>'` excludes an untracked artifact while still reporting real changes.
+
+**Files:**
+- Modify: `internal/gitmeta/gitmeta.go` (`Load` ~line 16-31)
+- Modify: `main.go` (`run`: extract a repo-side-dest helper used by both the ignore computation ~line 214 and `emitReport`)
+- Test: `internal/gitmeta/gitmeta_test.go`, `main_test.go`
+
+**Interfaces:**
+- Consumes: `architext.FileName`; `runOpts.architext`/`architextDir`.
+- Produces: `func Load(repo string, ignore ...string) (contract.Meta, error)` — `ignore` are repo-relative paths excluded from the dirty check; `func architextDataFile(repo string, opts runOpts) string` — the repo-side artifact path (empty when the custom dir escapes the repo).
+
+- [ ] **Step 1: Write the failing gitmeta test**
+
+```go
+func TestLoadIgnoresGeneratedArtifact(t *testing.T) {
+	repo := t.TempDir()
+	run := func(args ...string) { c := exec.Command("git", args...); c.Dir = repo; if err := c.Run(); err != nil { t.Fatal(err) } }
+	run("init"); run("config", "user.email", "t@t.t"); run("config", "user.name", "t")
+	os.WriteFile(filepath.Join(repo, "a.go"), []byte("package m\n"), 0o644)
+	run("add", "a.go"); run("commit", "-m", "init")
+
+	// Untracked generated artifact present.
+	os.MkdirAll(filepath.Join(repo, "docs/architext/data"), 0o755)
+	os.WriteFile(filepath.Join(repo, "docs/architext/data/code-graph.json"), []byte("{}\n"), 0o644)
+
+	dirty, err := Load(repo) // no ignore -> sees the untracked artifact
+	if err != nil { t.Fatal(err) }
+	if !strings.HasSuffix(dirty.Tree, "-dirty") {
+		t.Errorf("without ignore, tree = %q, want -dirty", dirty.Tree)
+	}
+	clean, err := Load(repo, "docs/architext/data/code-graph.json") // ignore it
+	if err != nil { t.Fatal(err) }
+	if strings.HasSuffix(clean.Tree, "-dirty") {
+		t.Errorf("with the artifact ignored, tree = %q, want clean", clean.Tree)
+	}
+	// A REAL change must still register as dirty even with the ignore.
+	os.WriteFile(filepath.Join(repo, "a.go"), []byte("package m\n// x\n"), 0o644)
+	stillDirty, err := Load(repo, "docs/architext/data/code-graph.json")
+	if err != nil { t.Fatal(err) }
+	if !strings.HasSuffix(stillDirty.Tree, "-dirty") {
+		t.Errorf("a real source change must be dirty despite the ignore; tree = %q", stillDirty.Tree)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd ~/code/magma && go test ./internal/gitmeta/ -run TestLoadIgnoresGeneratedArtifact -v`
+Expected: FAIL — `Load` takes no `ignore` argument.
+
+- [ ] **Step 3: Implement the gitmeta ignore**
+
+Replace `Load` in `internal/gitmeta/gitmeta.go`:
+
+```go
+// Load reads the short HEAD sha and dirty state of the repo. Tree is the sha,
+// suffixed "-dirty" when the working tree has uncommitted changes. Any repo-
+// relative paths in ignore are excluded from the dirty check — magma passes the
+// artifact it writes into the repo so its own output never makes the NEXT run
+// see a dirty tree (which would flip the deterministic tree stamp and defeat
+// freshness). A real source change is still reported as dirty.
+func Load(repo string, ignore ...string) (contract.Meta, error) {
+	sha, err := gitOut(repo, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return contract.Meta{}, err
+	}
+	statusArgs := []string{"status", "--porcelain"}
+	if len(ignore) > 0 {
+		statusArgs = append(statusArgs, "--", ".")
+		for _, p := range ignore {
+			statusArgs = append(statusArgs, ":(exclude)"+p)
+		}
+	}
+	status, err := gitOut(repo, statusArgs...)
+	if err != nil {
+		return contract.Meta{}, err
+	}
+	tree := sha
+	if strings.TrimSpace(status) != "" {
+		tree = sha + "-dirty"
+	}
+	date, _ := gitOut(repo, "show", "-s", "--format=%cI", "HEAD") // %cI = committer date, ISO-8601
+	return contract.Meta{SHA: sha, Tree: tree, CommitDate: date}, nil
+}
+```
+
+- [ ] **Step 4: Run gitmeta test to verify it passes**
+
+Run: `cd ~/code/magma && go test ./internal/gitmeta/ -v`
+Expected: PASS.
+
+- [ ] **Step 5: Wire the ignore into `run` (DRY the dest path)**
+
+Extract the repo-side dest helper and use it in BOTH `emitReport` and the ignore computation (removes the duplicated default-dir logic Task 8 introduced):
+
+```go
+// architextDataFile returns the repo-side code-graph.json path for this run, or
+// "" when --architext is off or its custom dir resolves outside the repo (then
+// it cannot affect the repo's dirty state).
+func architextDataFile(repo string, opts runOpts) string {
+	if !opts.architext {
+		return ""
+	}
+	dir := opts.architextDir
+	if dir == "" {
+		dir = filepath.Join(repo, "docs", "architext", "data")
+	}
+	return filepath.Join(dir, architext.FileName)
+}
+```
+
+In `emitReport`, replace the inline archDir/default computation with a call to `architextDataFile(repo, opts)` (skip the write when it returns ""). In `run`, before `gitmeta.Load` (main.go:214), compute the ignore:
+
+```go
+	var ignore []string
+	if f := architextDataFile(repo, opts); f != "" {
+		if rel, err := filepath.Rel(repo, f); err == nil && !strings.HasPrefix(rel, "..") {
+			ignore = append(ignore, rel)
+		}
+	}
+	meta, err := gitmeta.Load(repo, ignore...)
+```
+
+Note: `opts` (a `runOpts`) must be in scope at line 214 — it is (it's `run`'s parameter). If `emitReport` currently recomputes the vault mirror dest separately, keep that; only the repo-side archDir default moves into the helper.
+
+- [ ] **Step 6: Add the end-to-end determinism test**
+
+In `main_test.go`, using the existing git-repo fixture harness, run `--architext` on a fixture repo TWICE and assert the two `code-graph.json` outputs are byte-identical (this is the property that failed before the fix — the first run's artifact must not dirty the second run's tree stamp):
+
+```go
+func TestArchitextEmissionIsDeterministicAcrossRuns(t *testing.T) {
+	// Build/locate a committed git-repo fixture (reuse the harness other tests use).
+	// Run twice with --architext; the repo-side code-graph.json from run 1 must not
+	// flip run 2's tree stamp.
+	repo := /* fixture repo path (committed, clean) */
+	out := t.TempDir()
+	runMagmaArchitext(t, repo, "fix", out)          // harness helper mirroring other main_test runs
+	first, _ := os.ReadFile(filepath.Join(repo, "docs/architext/data", architext.FileName))
+	runMagmaArchitext(t, repo, "fix", out)
+	second, _ := os.ReadFile(filepath.Join(repo, "docs/architext/data", architext.FileName))
+	if !bytes.Equal(first, second) {
+		t.Errorf("two --architext runs produced different bytes:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+}
+```
+
+Adapt the fixture/harness names to what `main_test.go` already provides. If no committed git-repo fixture exists there, follow the pattern the gitmeta or existing main_test tests use to create one (git init + commit in a temp dir). Ensure the fixture is CLEAN (committed) so the only dirtiness in play is magma's own artifact.
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `cd ~/code/magma && go test ./... && gofmt -l . && go vet ./...`
+Expected: all clean.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add internal/gitmeta/gitmeta.go internal/gitmeta/gitmeta_test.go main.go main_test.go
+git commit -m "fix(architext): exclude magma's own code-graph.json from the dirty-tree check (deterministic tree stamp)"
+```
+
 ## Self-Review
 
 **Spec coverage** (against `2026-07-24-magma-architext-emitter-design.md`):
