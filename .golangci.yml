@@ -1,0 +1,20 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+# Keep the standard set (errcheck, govet, ineffassign, staticcheck, unused) and
+# add a couple of low-noise checks. magma is small; the bar is "clean by default".
+linters:
+  default: standard
+  enable:
+    - misspell
+    - unconvert
+  settings:
+    misspell:
+      ignore-rules:
+        - roboticus # a real repository name, not a misspelling of "robotics"
+
+formatters:
+  enable:
+    - gofmt
