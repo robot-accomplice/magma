@@ -94,6 +94,7 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta, progress Progress) 
 	// the module's own packages (the same filter deadcode applies to its output).
 	step("collecting nodes")
 	modPath := moduledPath(withTests.initial)
+	g.Module = modPath
 	nodes, posnID := collectNodes(repo, modPath, withTests.prog, withTests.initial, reachAll, reachProd, withTests.mains)
 	step("collecting edges")
 	edges := collectEdges(repo, withTests.prog, resAll.CallGraph, posnID)

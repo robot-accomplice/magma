@@ -47,6 +47,7 @@ type Graph struct {
 	ContractVersion     string `json:"contract_version"`
 	Generator           string `json:"generator"`
 	Language            string `json:"language"`
+	Module              string `json:"module"`
 	SHA                 string `json:"sha"`
 	Tree                string `json:"tree"`
 	Fidelity            string `json:"fidelity"` // what an edge MEANS here (e.g. "rta", "syntactic")
