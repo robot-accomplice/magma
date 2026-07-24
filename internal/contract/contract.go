@@ -45,10 +45,11 @@ type Note struct {
 // Meta is the provenance every Note in a run shares: it is stamped once by the
 // runner and handed to each backend so backends never touch git or clocks.
 type Meta struct {
-	Generator string // e.g. "magma/0.1.0"
-	SHA       string // short HEAD sha
-	Tree      string // SHA, or SHA+"-dirty" when the working tree is dirty
-	Fidelity  string // per-language meaning of "dead" (backend-supplied)
+	Generator  string // e.g. "magma/0.1.0"
+	SHA        string // short HEAD sha
+	Tree       string // SHA, or SHA+"-dirty" when the working tree is dirty
+	CommitDate string // ISO-8601 commit date of HEAD (e.g. 2026-07-24T14:06:00-04:00), deterministic for a SHA
+	Fidelity   string // per-language meaning of "dead" (backend-supplied)
 }
 
 // Computed builds a note whose analysis succeeded. Rows are sorted for a stable,

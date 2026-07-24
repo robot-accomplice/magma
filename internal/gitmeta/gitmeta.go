@@ -26,7 +26,8 @@ func Load(repo string) (contract.Meta, error) {
 	if strings.TrimSpace(status) != "" {
 		tree = sha + "-dirty"
 	}
-	return contract.Meta{SHA: sha, Tree: tree}, nil
+	date, _ := gitOut(repo, "show", "-s", "--format=%cI", "HEAD") // %cI = committer date, ISO-8601
+	return contract.Meta{SHA: sha, Tree: tree, CommitDate: date}, nil
 }
 
 func gitOut(repo string, args ...string) (string, error) {
