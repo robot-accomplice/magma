@@ -15,10 +15,17 @@ import (
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 
-// slug lowercases s and collapses every run of non-[a-z0-9] into a single "-",
-// trimming leading/trailing dashes. Deterministic and dependency-free.
+// slug lowercases s, collapses each run of non-[a-z0-9] into a single "-",
+// trims leading/trailing "-", and guarantees a leading letter (prefixing "x-"
+// when the trimmed result is empty or starts with a digit). Every slug
+// therefore satisfies Architext's id pattern ^[a-z][a-z0-9-]*$. Deterministic
+// and dependency-free.
 func slug(s string) string {
-	return strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(s), "-"), "-")
+	out := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(s), "-"), "-")
+	if out == "" || out[0] < 'a' || out[0] > 'z' {
+		out = strings.Trim("x-"+out, "-")
+	}
+	return out
 }
 
 // moduleID is the stable slug for a package.

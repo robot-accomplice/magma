@@ -2,6 +2,7 @@ package architext
 
 import (
 	"reflect"
+	"regexp"
 	"testing"
 
 	"github.com/robot-accomplice/magma/internal/contract"
@@ -47,6 +48,26 @@ func TestAssignIDsDisambiguatesCollisions(t *testing.T) {
 // the identical map across several distinct input permutations. It must FAIL
 // against the (File, Line)-only comparator and PASS with the (File, Line, ID)
 // fix.
+func TestSlugAlwaysStartsWithLetter(t *testing.T) {
+	re := regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	cases := map[string]string{
+		"internal/backend": "internal-backend", // unchanged: already letter-leading
+		"2048game":         "x-2048game",       // digit-leading -> prefixed
+		"123":              "x-123",
+		"_Foo":             "foo", // underscore trimmed, then letter-leading
+		"":                 "x",   // empty -> "x"
+	}
+	for in, want := range cases {
+		got := slug(in)
+		if got != want {
+			t.Errorf("slug(%q) = %q, want %q", in, got, want)
+		}
+		if !re.MatchString(got) {
+			t.Errorf("slug(%q) = %q does not match Architext id pattern", in, got)
+		}
+	}
+}
+
 func TestAssignIDsCollisionTiebreakIsInputOrderIndependent(t *testing.T) {
 	tied := contract.Node{Pkg: "p", Symbol: "T.M", File: "a.go", Line: 10}
 	n5 := tied
