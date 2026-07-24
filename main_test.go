@@ -153,6 +153,57 @@ func TestRunReconcilesStaleNotes(t *testing.T) {
 	}
 }
 
+// safeJoin (the containment guard behind writeContained/removeContained) must
+// refuse a path that passes through a symlink planted at any component, not
+// just resolve it and follow along. relPath's first component ("nodes") is
+// itself a symlink pointing at a directory OUTSIDE out; a no-op guard would
+// happily write/delete through it into that external directory.
+func TestSafeJoinRejectsSymlinkEscape(t *testing.T) {
+	out := t.TempDir()
+	outside := t.TempDir()
+
+	if err := os.Symlink(outside, filepath.Join(out, "nodes")); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join("nodes", "x.md")
+
+	if err := writeContained(out, target, []byte("pwned")); err == nil {
+		t.Error("writeContained through a symlinked path component must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "x.md")); !os.IsNotExist(err) {
+		t.Error("writeContained must not have written through the symlink into the external target")
+	}
+
+	// Plant the file directly in the external dir (bypassing the guard) so a
+	// buggy removeContained that follows the symlink has something to delete —
+	// proving the assertion is genuinely exercising the check, not vacuously
+	// passing because there was nothing there to remove.
+	external := filepath.Join(outside, "x.md")
+	if err := os.WriteFile(external, []byte("do not delete me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeContained(out, target); err == nil {
+		t.Error("removeContained through a symlinked path component must be rejected")
+	}
+	if _, err := os.Stat(external); err != nil {
+		t.Error("removeContained must not have deleted through the symlink into the external target")
+	}
+}
+
+// A relative path containing ".." must never resolve outside out, regardless
+// of whether any component is a symlink.
+func TestSafeJoinRejectsTraversal(t *testing.T) {
+	out := t.TempDir()
+	escapedTarget := filepath.Join(filepath.Dir(out), "escape.md")
+
+	if err := writeContained(out, filepath.Join("..", "escape.md"), []byte("pwned")); err == nil {
+		t.Error("writeContained must reject a relative path that escapes out via ..")
+	}
+	if _, err := os.Stat(escapedTarget); !os.IsNotExist(err) {
+		t.Error("writeContained must not have written outside out")
+	}
+}
+
 // isFresh must require the FULL markdown asset set the manifest promises, not
 // just the JSON. We delete "Dead code.md" rather than Overview.md: the
 // fresh-skip path always re-renders Overview.md regardless (its "Last
