@@ -10,12 +10,14 @@ import (
 
 // functionNote renders one node's markdown: YAML frontmatter + a file:line pointer +
 // a "## Calls" list of [[callee]] links (deduped, sorted; dynamic edges annotated).
-// callees are the node's outgoing edges resolved to nodes.
-func functionNote(n contract.Node, callees []contract.Edge, byID map[int]contract.Node, module string) string {
+// callees are the node's outgoing edges resolved to nodes. folderName stamps the
+// per-project tag (projectTag) so a vault holding several maps can filter its
+// graph view to just this one.
+func functionNote(n contract.Node, callees []contract.Edge, byID map[int]contract.Node, module, folderName string) string {
 	dead := !n.Reachable && !n.Generated && !n.Root
 	testOnly := n.Reachable && !n.ProdReachable && !n.Test && !n.Root && !n.Generated
 
-	tags := []string{"magma/node"}
+	tags := []string{"magma/node", projectTag(folderName)}
 	if dead {
 		tags = append(tags, "magma/dead")
 	}
