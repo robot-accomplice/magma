@@ -131,6 +131,13 @@ func TestBuildGraphReportsProgress(t *testing.T) {
 	}
 }
 
+func TestBuildGraphStampsModule(t *testing.T) {
+	g := buildFixture(t, "livemod")
+	if g.Module != "magmafixture" {
+		t.Errorf("Module = %q, want %q", g.Module, "magmafixture")
+	}
+}
+
 func hasStaticEdge(g contract.Graph, from, to int) bool {
 	for _, e := range g.Edges {
 		if e.From == from && e.To == to && e.Kind == "static" {

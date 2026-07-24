@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,17 @@ func initRepo(t *testing.T) string {
 	run(t, repo, "git", "add", ".")
 	run(t, repo, "git", "commit", "-m", "init")
 	return repo
+}
+
+func TestLoadCommitDate(t *testing.T) {
+	repo := initRepo(t)
+	meta, err := Load(repo)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !strings.HasPrefix(meta.CommitDate, "2020-01-01") {
+		t.Errorf("CommitDate = %q, want it to start 2020-01-01", meta.CommitDate)
+	}
 }
 
 func run(t *testing.T, dir, name string, args ...string) {
