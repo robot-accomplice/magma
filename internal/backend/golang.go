@@ -34,7 +34,12 @@ type goBackend struct{}
 
 func (goBackend) Language() string { return "go" }
 
-func (goBackend) BuildGraph(repo string, meta contract.Meta) (contract.Graph, error) {
+func (goBackend) BuildGraph(repo string, meta contract.Meta, progress Progress) (contract.Graph, error) {
+	step := func(s string) {
+		if progress != nil {
+			progress(s)
+		}
+	}
 	g := contract.NewGraph(meta, "go", "rta")
 
 	// Two loads, deliberately — the same design deadcode uses. A single Tests:true
@@ -43,6 +48,7 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta) (contract.Graph, er
 	// under-reaches. So: load WITH tests for the emitted graph and all-roots
 	// reachability, load WITHOUT tests for production reachability. Positions are
 	// file:line:col, identical across loads, so the two reachability sets compose.
+	step("loading packages (with tests)")
 	withTests, reason, err := load(repo, true)
 	if err != nil {
 		return g, err
@@ -56,6 +62,7 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta) (contract.Graph, er
 		return g.Refuse("no entrypoint (main or test) in scope; reachability not computable"), nil
 	}
 
+	step("analyzing reachability")
 	var allRoots []*ssa.Function
 	for _, m := range withTests.mains {
 		allRoots = appendRoots(allRoots, m)
@@ -66,6 +73,7 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta) (contract.Graph, er
 	// Production reachability from the tests-excluded program. An empty result
 	// (no production main) is honest: ProdReachable stays all-false and the
 	// derived views refuse via hasProdRoot.
+	step("loading packages (production)")
 	reachProd := map[token.Position]bool{}
 	prod, prodReason, err := load(repo, false)
 	if err != nil {
@@ -77,14 +85,17 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta) (contract.Graph, er
 			prodRoots = appendRoots(prodRoots, m)
 		}
 		if len(prodRoots) > 0 {
+			step("analyzing production reachability")
 			reachProd = reachablePositions(prod.prog, rta.Analyze(prodRoots, false))
 		}
 	}
 
 	// The map is about THIS repo, not its dependency closure: restrict nodes to
 	// the module's own packages (the same filter deadcode applies to its output).
+	step("collecting nodes")
 	modPath := moduledPath(withTests.initial)
 	nodes, posnID := collectNodes(repo, modPath, withTests.prog, withTests.initial, reachAll, reachProd, withTests.mains)
+	step("collecting edges")
 	edges := collectEdges(repo, withTests.prog, resAll.CallGraph, posnID)
 
 	g.Nodes = nodes
