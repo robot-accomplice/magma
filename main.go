@@ -21,6 +21,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,17 +37,32 @@ import (
 const version = "0.1.0"
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: magma <repo-path> <name> <output-root>")
+	force, pos := parseArgs(os.Args[1:])
+	if len(pos) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: magma [--force] <repo-path> <name> <output-root>")
 		os.Exit(2)
 	}
-	if err := run(os.Args[1], os.Args[2], os.Args[3]); err != nil {
+	if err := run(pos[0], pos[1], pos[2], force); err != nil {
 		fmt.Fprintln(os.Stderr, "magma: "+err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(repoArg, name, outRoot string) error {
+// parseArgs splits an optional --force/-f flag from the three positional args.
+// Freshness skipping is the default; --force rebuilds an already-fresh map.
+func parseArgs(args []string) (force bool, pos []string) {
+	for _, a := range args {
+		switch a {
+		case "--force", "-f":
+			force = true
+		default:
+			pos = append(pos, a)
+		}
+	}
+	return force, pos
+}
+
+func run(repoArg, name, outRoot string, force bool) error {
 	out, err := prepareOutput(name, outRoot)
 	if err != nil {
 		return err
@@ -65,6 +81,14 @@ func run(repoArg, name, outRoot string) error {
 	}
 	meta.Generator = "magma/" + version
 
+	// Building the map is the expensive step, so skip it when a current one is
+	// already on disk — magma is meant to be run before every audit/code task and
+	// must be near-free when nothing changed. --force overrides.
+	if !force && isFresh(out, meta) {
+		fmt.Printf("magma: %s [%s] already fresh -> %s (use --force to rebuild)\n", name, meta.Tree, out)
+		return nil
+	}
+
 	lang := detect.Detect(repo)
 	b, ok := backend.For(lang)
 	if !ok {
@@ -76,6 +100,32 @@ func run(repoArg, name, outRoot string) error {
 		return err
 	}
 	return writeAll(out, meta, g, name)
+}
+
+// isFresh reports whether a complete, current map already exists at out — the
+// idempotency guard that lets magma run before every task for near-zero cost.
+// Fresh means: all three files present, graph.json stamps the exact tree we're
+// looking at, and it was built by THIS magma version. A dirty tree is never fresh
+// (its working-tree content can't be reproduced from the sha), and a generator
+// mismatch means a magma upgrade must re-map even at the same commit.
+func isFresh(out string, meta contract.Meta) bool {
+	if strings.HasSuffix(meta.Tree, "-dirty") {
+		return false
+	}
+	for _, f := range []string{"graph.json", "_dead.json", "_test-only.json"} {
+		if _, err := os.Stat(filepath.Join(out, f)); err != nil {
+			return false
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(out, "graph.json"))
+	if err != nil {
+		return false
+	}
+	var g contract.Graph
+	if err := json.Unmarshal(b, &g); err != nil {
+		return false
+	}
+	return g.Tree == meta.Tree && g.Generator == meta.Generator
 }
 
 // prepareOutput validates name as a single safe path component, resolves the
