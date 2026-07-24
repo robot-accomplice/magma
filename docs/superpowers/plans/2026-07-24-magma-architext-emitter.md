@@ -484,8 +484,11 @@ func moduleID(pkg string) string { return slug(pkg) }
 
 // assignIDs returns a stable slug for every node ID, keyed by node.ID. The base
 // slug is slug(pkg + "-" + symbol). Collisions (e.g. value + pointer methods on
-// one type) are broken deterministically: the node earliest by (file, line)
-// keeps the base slug; the next gets "-2", then "-3", and so on.
+// one type) are broken deterministically by (file, line, id): the node earliest
+// by that key keeps the base slug; the next gets "-2", then "-3", and so on. The
+// trailing node.ID makes the order TOTAL (ids are unique, assigned upstream in
+// collectNodes), so the result is input-order-independent even when two colliding
+// nodes share a file and line — (file, line) alone is not a total order.
 func assignIDs(nodes []contract.Node) map[int]string {
 	byBase := map[string][]contract.Node{}
 	for _, n := range nodes {
@@ -498,7 +501,10 @@ func assignIDs(nodes []contract.Node) map[int]string {
 			if group[i].File != group[j].File {
 				return group[i].File < group[j].File
 			}
-			return group[i].Line < group[j].Line
+			if group[i].Line != group[j].Line {
+				return group[i].Line < group[j].Line
+			}
+			return group[i].ID < group[j].ID
 		})
 		for i, n := range group {
 			if i == 0 {
@@ -819,6 +825,14 @@ func TestRollupAggregates(t *testing.T) {
 	if byID["a"].Counts.Functions != 2 || byID["a"].Counts.Dead != 1 {
 		t.Errorf("module a counts = %+v, want functions=2 dead=1", byID["a"].Counts)
 	}
+	// Module fan = distinct module-graph degree: a has one out-edge (a->b), no in;
+	// b has one in-edge (from a), no out (its self-edge b->b is intra-module).
+	if byID["a"].FanOut != 1 || byID["a"].FanIn != 0 {
+		t.Errorf("module a fan = in%d out%d, want in0 out1", byID["a"].FanIn, byID["a"].FanOut)
+	}
+	if byID["b"].FanIn != 1 || byID["b"].FanOut != 0 {
+		t.Errorf("module b fan = in%d out%d, want in1 out0", byID["b"].FanIn, byID["b"].FanOut)
+	}
 	if len(mcalls) != 1 {
 		t.Fatalf("module_calls = %d, want 1 (a->b; intra-module b->b excluded)", len(mcalls))
 	}
@@ -878,8 +892,15 @@ func rollup(nodes []contract.Node, edges []contract.Edge, ids map[int]string) ([
 		if e.Kind == "dynamic" {
 			mc.HasDynamic = true
 		}
-		mods[from].FanOut++
-		mods[to].FanIn++
+	}
+
+	// Module fan is the module-graph degree: the number of DISTINCT inter-module
+	// edges in/out of each module, NOT the summed underlying call counts. Counting
+	// one per aggregated module_call (after dedup) is what makes it "distinct" — a
+	// module pair joined by many underlying calls still contributes exactly 1.
+	for _, mc := range agg {
+		mods[mc.From].FanOut++
+		mods[mc.To].FanIn++
 	}
 
 	outMods := make([]Module, 0, len(mods))
