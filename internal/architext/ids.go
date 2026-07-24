@@ -26,8 +26,11 @@ func moduleID(pkg string) string { return slug(pkg) }
 
 // assignIDs returns a stable slug for every node ID, keyed by node.ID. The base
 // slug is slug(pkg + "-" + symbol). Collisions (e.g. value + pointer methods on
-// one type) are broken deterministically: the node earliest by (file, line)
-// keeps the base slug; the next gets "-2", then "-3", and so on.
+// one type) are broken deterministically by (file, line, id): the node earliest
+// by (file, line) keeps the base slug; the next gets "-2", then "-3", and so on.
+// id is the final tiebreak — it is unique per node and assigned upstream in
+// collectNodes independent of assignIDs's input order, so (file, line, id) is a
+// total order and the result is independent of the order nodes was passed in.
 func assignIDs(nodes []contract.Node) map[int]string {
 	byBase := map[string][]contract.Node{}
 	for _, n := range nodes {
@@ -40,7 +43,10 @@ func assignIDs(nodes []contract.Node) map[int]string {
 			if group[i].File != group[j].File {
 				return group[i].File < group[j].File
 			}
-			return group[i].Line < group[j].Line
+			if group[i].Line != group[j].Line {
+				return group[i].Line < group[j].Line
+			}
+			return group[i].ID < group[j].ID
 		})
 		for i, n := range group {
 			if i == 0 {

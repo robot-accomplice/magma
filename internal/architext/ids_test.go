@@ -1,6 +1,7 @@
 package architext
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/robot-accomplice/magma/internal/contract"
@@ -30,5 +31,50 @@ func TestAssignIDsDisambiguatesCollisions(t *testing.T) {
 	got := assignIDs(nodes)
 	if got[1] != "p-t-m" || got[0] != "p-t-m-2" {
 		t.Errorf("collision resolution = %v, want id1=p-t-m (a.go:10 first), id0=p-t-m-2", got)
+	}
+}
+
+// TestAssignIDsCollisionTiebreakIsInputOrderIndependent pins the determinism
+// hole found in review: when colliding nodes (same base slug) also share
+// (File, Line), the old comparator returned false both ways, so sort.Slice's
+// unstable pdqsort broke the tie by input/partition order rather than any
+// property of the nodes. That makes id assignment depend on the order `nodes`
+// happened to be passed to assignIDs — nondeterministic across calls in
+// practice, since map/slice construction order upstream is not guaranteed.
+// The fix adds Node.ID (unique, assigned independently of assignIDs's input
+// order) as the final tiebreak, making the comparator a total order. This test
+// builds a group of 3 nodes tied on (File, Line) and asserts assignIDs returns
+// the identical map across several distinct input permutations. It must FAIL
+// against the (File, Line)-only comparator and PASS with the (File, Line, ID)
+// fix.
+func TestAssignIDsCollisionTiebreakIsInputOrderIndependent(t *testing.T) {
+	tied := contract.Node{Pkg: "p", Symbol: "T.M", File: "a.go", Line: 10}
+	n5 := tied
+	n5.ID = 5
+	n2 := tied
+	n2.ID = 2
+	n9 := tied
+	n9.ID = 9
+
+	orderings := [][]contract.Node{
+		{n5, n2, n9},
+		{n9, n2, n5},
+		{n2, n9, n5},
+		{n9, n5, n2},
+		{n2, n5, n9},
+	}
+
+	var want map[int]string
+	for i, nodes := range orderings {
+		// Defensive copy: assignIDs's sort.Slice mutates its input slice.
+		input := append([]contract.Node(nil), nodes...)
+		got := assignIDs(input)
+		if i == 0 {
+			want = got
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("ordering %d %v: assignIDs = %v, want %v (must match ordering 0's result — id assignment must not depend on input order)", i, nodes, got, want)
+		}
 	}
 }
