@@ -1386,6 +1386,77 @@ git add internal/gitmeta/gitmeta.go internal/gitmeta/gitmeta_test.go main.go mai
 git commit -m "fix(architext): exclude magma's own code-graph.json from the dirty-tree check (deterministic tree stamp)"
 ```
 
+### Task 11: Guarantee every id starts with a letter (Architext `^[a-z][a-z0-9-]*$`)
+
+**Added from the Architext side's source-checked contract confirmation.** Architext validates every code-graph id against `^[a-z][a-z0-9-]*$` (per-file id-space, no global uniqueness). `slug()` can currently emit a digit-leading id (a module/package path starting with a digit, e.g. module `2048`) or, pathologically, an empty string — either fails that pattern and rejects the WHOLE artifact. Fix: `slug` guarantees a leading letter, prefixing `x-` otherwise. This is producer-side, deterministic, and leaves the common case (domain/letter-leading paths) unchanged.
+
+**Files:**
+- Modify: `internal/architext/ids.go` (`slug`)
+- Test: `internal/architext/ids_test.go`
+
+**Interfaces:** No signature change — `slug`/`moduleID`/`assignIDs` keep their shapes; only `slug`'s guaranteed output range narrows (always matches `^[a-z][a-z0-9-]*$`).
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+func TestSlugAlwaysStartsWithLetter(t *testing.T) {
+	re := regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	cases := map[string]string{
+		"internal/backend": "internal-backend", // unchanged: already letter-leading
+		"2048game":         "x-2048game",        // digit-leading -> prefixed
+		"123":              "x-123",
+		"_Foo":             "foo",               // underscore trimmed, then letter-leading
+		"":                 "x",                 // empty -> "x"
+	}
+	for in, want := range cases {
+		got := slug(in)
+		if got != want {
+			t.Errorf("slug(%q) = %q, want %q", in, got, want)
+		}
+		if !re.MatchString(got) {
+			t.Errorf("slug(%q) = %q does not match Architext id pattern", in, got)
+		}
+	}
+}
+```
+
+Add `"regexp"` to the test file imports if not present.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd ~/code/magma && go test ./internal/architext/ -run TestSlugAlwaysStartsWithLetter -v`
+Expected: FAIL — `slug("2048game")` returns `"2048game"` (no prefix), `slug("")` returns `""`.
+
+- [ ] **Step 3: Implement the leading-letter guarantee**
+
+Replace `slug` in `internal/architext/ids.go`:
+
+```go
+// slug lowercases s, collapses each run of non-[a-z0-9] into a single "-", trims
+// leading/trailing "-", and guarantees a leading letter (prefixing "x-" when the
+// trimmed result is empty or starts with a digit). Every slug therefore satisfies
+// Architext's id pattern ^[a-z][a-z0-9-]*$. Deterministic and dependency-free.
+func slug(s string) string {
+	out := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(s), "-"), "-")
+	if out == "" || out[0] < 'a' || out[0] > 'z' {
+		out = strings.Trim("x-"+out, "-")
+	}
+	return out
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd ~/code/magma && go test ./internal/architext/ -v`
+Expected: PASS (new test + all existing ids/emit/rollup/write tests — their fixtures are all letter-leading, so no expected-value churn).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/architext/ids.go internal/architext/ids_test.go
+git commit -m "fix(architext): guarantee every id starts with a letter (Architext id pattern)"
+```
+
 ## Self-Review
 
 **Spec coverage** (against `2026-07-24-magma-architext-emitter-design.md`):
