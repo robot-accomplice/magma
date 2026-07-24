@@ -79,7 +79,7 @@ func provenanceCallout(g contract.Graph, opts Options) string {
 	fmt.Fprintf(&b, "> Last validated: %s\n", opts.Validated)
 
 	if strings.HasSuffix(g.Tree, "-dirty") {
-		b.WriteString(">\n> [!warning] Dirty working tree\n> This map was built from an uncommitted working tree; it does not correspond to any single commit.\n")
+		b.WriteString("\n> [!warning] Dirty working tree\n> This map was built from an uncommitted working tree; it can't be reproduced from its SHA.\n")
 	}
 	return b.String()
 }
