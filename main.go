@@ -211,7 +211,13 @@ func run(repoArg, name, outRoot string, opts runOpts) error {
 		return fmt.Errorf("repo %q is not a directory", repoArg)
 	}
 
-	meta, err := gitmeta.Load(repo)
+	var ignore []string
+	if f := architextDataFile(repo, opts); f != "" {
+		if rel, err := filepath.Rel(repo, f); err == nil && !strings.HasPrefix(rel, "..") {
+			ignore = append(ignore, rel)
+		}
+	}
+	meta, err := gitmeta.Load(repo, ignore...)
 	if err != nil {
 		return fmt.Errorf("reading git metadata (is %q a git repo?): %w", repoArg, err)
 	}
@@ -372,6 +378,23 @@ func refusedGraph(meta contract.Meta, lang detect.Lang) contract.Graph {
 	return contract.NewGraph(meta, string(lang), "").Refuse(reason)
 }
 
+// architextDataFile returns the repo-side code-graph.json destination for this
+// run (the custom --architext=DIR, or the default docs/architext/data under
+// repo), or "" when --architext wasn't requested at all. Shared by emitReport
+// (which writes here) and run's dirty-check ignore computation (which further
+// filters out any path that resolves outside repo, since that can't affect
+// the repo's dirty state).
+func architextDataFile(repo string, opts runOpts) string {
+	if !opts.architext {
+		return ""
+	}
+	dir := opts.architextDir
+	if dir == "" {
+		dir = filepath.Join(repo, "docs", "architext", "data")
+	}
+	return filepath.Join(dir, architext.FileName)
+}
+
 // emitReport writes the JSON artifacts (hidden under dataDir) and the Obsidian
 // markdown notes (under out), optionally dual-writes the architext code-graph,
 // reconciles stale notes from the prior run, and prints the styled panel to
@@ -384,16 +407,9 @@ func emitReport(out, dataDir, repo string, meta contract.Meta, name string, g co
 	if err != nil {
 		return err
 	}
-	if opts.architext {
-		archDir := opts.architextDir
-		if archDir == "" {
-			archDir = filepath.Join(repo, "docs", "architext", "data")
-		}
+	if archFile := architextDataFile(repo, opts); archFile != "" {
 		cg := architext.Emit(g)
-		if err := architext.Write(cg,
-			filepath.Join(archDir, architext.FileName),
-			filepath.Join(dataDir, architext.FileName),
-		); err != nil {
+		if err := architext.Write(cg, archFile, filepath.Join(dataDir, architext.FileName)); err != nil {
 			return fmt.Errorf("writing architext code-graph: %w", err)
 		}
 	}
