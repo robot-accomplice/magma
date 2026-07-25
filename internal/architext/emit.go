@@ -2,6 +2,7 @@ package architext
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/robot-accomplice/magma/internal/contract"
 )
@@ -57,12 +58,29 @@ type Call struct {
 	Kind     string `json:"kind"`
 }
 
+// treeState translates magma's internal tree stamp into the code-graph contract's
+// tree STATE. Internally (and in graph.json, which the audit gate reads) Tree is
+// "<sha>" or "<sha>-dirty"; this contract instead specifies "clean" | "dirty",
+// because the commit already travels in the sha field — repeating it in tree
+// carries no information, while the clean/dirty bit does. Translating here rather
+// than changing contract.Meta keeps magma's established graph.json contract intact:
+// adapting a domain value to a consumer's shape is exactly this package's job.
+//
+// Tree always arrives as a real stamp: run aborts when gitmeta.Load fails, so no
+// graph — computed or refused — reaches this package without one.
+func treeState(tree string) string {
+	if strings.HasSuffix(tree, "-dirty") {
+		return "dirty"
+	}
+	return "clean"
+}
+
 // Emit maps a computed graph to the code-graph artifact. A refused graph yields
 // a refused code-graph (computable=false, nil slices) — never a fabricated one.
 func Emit(g contract.Graph) CodeGraph {
 	cg := CodeGraph{
 		ContractVersion: contractVersion, Generator: g.Generator,
-		Language: g.Language, Module: g.Module, SHA: g.SHA, Tree: g.Tree,
+		Language: g.Language, Module: g.Module, SHA: g.SHA, Tree: treeState(g.Tree),
 		Fidelity: g.Fidelity, Computable: g.Computable, NotComputableReason: g.NotComputableReason,
 	}
 	if !g.Computable {
