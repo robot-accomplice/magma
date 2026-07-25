@@ -53,7 +53,7 @@ envelope reuses magma's existing provenance so a refused graph propagates unchan
 ```jsonc
 {
   "contract_version": "magma-code-graph/1",
-  "generator": "magma vX.Y.Z",
+  "generator": "magma/0.1.0",        // "magma/" + the binary version
   "language": "go",
   "module": "github.com/robot-accomplice/magma",
   "sha": "ce1a52a",
