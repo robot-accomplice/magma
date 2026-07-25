@@ -2,6 +2,7 @@ package backend
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -135,6 +136,51 @@ func TestBuildGraphStampsModule(t *testing.T) {
 	g := buildFixture(t, "livemod")
 	if g.Module != "magmafixture" {
 		t.Errorf("Module = %q, want %q", g.Module, "magmafixture")
+	}
+}
+
+// Per-function signatures (param name+type, result types) and the doc synopsis
+// are extracted from the SSA type info and the declaration's comment.
+func TestBuildGraphExtractsSignatureAndDoc(t *testing.T) {
+	g := buildFixture(t, "sigmod")
+
+	var add *contract.Node
+	for i := range g.Nodes {
+		if g.Nodes[i].Symbol == "Add" {
+			add = &g.Nodes[i]
+		}
+	}
+	if add == nil {
+		t.Fatal("no node for Add")
+	}
+	if add.Signature == nil {
+		t.Fatal("Add has no signature")
+	}
+	wantParams := []contract.Param{{Name: "a", Type: "int"}, {Name: "b", Type: "int"}}
+	if !reflect.DeepEqual(add.Signature.Params, wantParams) {
+		t.Errorf("params = %+v, want %+v", add.Signature.Params, wantParams)
+	}
+	if len(add.Signature.Results) != 1 || add.Signature.Results[0].Type != "int" {
+		t.Errorf("results = %+v, want [{int}]", add.Signature.Results)
+	}
+	if add.Doc != "Add returns the sum of a and b." {
+		t.Errorf("doc = %q, want the first sentence of the comment", add.Doc)
+	}
+}
+
+func TestBuildGraphComputesFan(t *testing.T) {
+	g := buildFixture(t, "sigmod")
+	fan := map[string][2]int{} // symbol -> {fanIn, fanOut}
+	for _, n := range g.Nodes {
+		fan[n.Symbol] = [2]int{n.FanIn, n.FanOut}
+	}
+	// main calls Add and sq (sq twice, deduped to one edge) -> fanOut 2, fanIn 0.
+	if fan["main"] != [2]int{0, 2} {
+		t.Errorf("main fan = %v, want {0,2}", fan["main"])
+	}
+	// Add is called once by main, calls nothing -> fanIn 1, fanOut 0.
+	if fan["Add"] != [2]int{1, 0} {
+		t.Errorf("Add fan = %v, want {1,0}", fan["Add"])
 	}
 }
 

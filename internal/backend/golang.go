@@ -3,6 +3,7 @@ package backend
 import (
 	"fmt"
 	"go/ast"
+	"go/doc"
 	"go/token"
 	"go/types"
 	"os"
@@ -98,6 +99,7 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta, progress Progress) 
 	nodes, posnID := collectNodes(repo, modPath, withTests.prog, withTests.initial, reachAll, reachProd, withTests.mains)
 	step("collecting edges")
 	edges := collectEdges(repo, withTests.prog, resAll.CallGraph, posnID)
+	assignFan(nodes, edges)
 
 	g.Nodes = nodes
 	g.Edges = edges
@@ -180,6 +182,7 @@ func collectNodes(
 	type decl struct {
 		fn  *ssa.Function
 		obj *types.Func
+		doc string
 	}
 	var decls []decl
 	seen := make(map[token.Position]bool)
@@ -210,7 +213,7 @@ func collectNodes(
 					continue // a test variant of an already-seen declaration
 				}
 				seen[posn] = true
-				decls = append(decls, decl{fn, obj})
+				decls = append(decls, decl{fn: fn, obj: obj, doc: synopsis(fd.Doc)})
 			}
 		}
 	})
@@ -237,6 +240,8 @@ func collectNodes(
 			Generated:     generated[posn.Filename],
 			Reachable:     reachAll[posn],
 			ProdReachable: reachProd[posn],
+			Signature:     signatureOf(d.fn.Signature),
+			Doc:           d.doc,
 		})
 		posnID[posn] = i
 	}
@@ -294,6 +299,22 @@ func collectEdges(repo string, prog *ssa.Program, cg *callgraph.Graph, posnID ma
 	return edges
 }
 
+// assignFan sets each node's FanIn/FanOut from the deduped edge set: FanOut is
+// the number of distinct callees, FanIn the number of distinct callers. Edges
+// are already deduped per (from,to) by collectEdges, so a plain tally suffices.
+func assignFan(nodes []contract.Node, edges []contract.Edge) {
+	in := make(map[int]int, len(nodes))
+	out := make(map[int]int, len(nodes))
+	for _, e := range edges {
+		out[e.From]++
+		in[e.To]++
+	}
+	for i := range nodes {
+		nodes[i].FanIn = in[nodes[i].ID]
+		nodes[i].FanOut = out[nodes[i].ID]
+	}
+}
+
 // prettyName renders a function/method name without go/ssa's punctuation, e.g.
 // "(*pkg.T).F" -> "T.F". It is a self-contained fork of deadcode's helper that
 // avoids the x/tools-internal receiver helper.
@@ -309,6 +330,45 @@ func prettyName(fn *ssa.Function) string {
 		}
 	}
 	return name
+}
+
+// synopsis returns the first sentence of a declaration's doc comment, or "" when
+// there is none (a nil CommentGroup yields empty text). It calls the method on a
+// zero-value doc.Package rather than the package-level doc.Synopsis, which is
+// deprecated as of Go 1.20: that function is itself defined as this exact call, so
+// the result is unchanged. A doc.Package built from real files would additionally
+// resolve doc links, which does not apply here — the synopsis is stored as plain
+// metadata, never rendered as Go doc.
+func synopsis(cg *ast.CommentGroup) string {
+	var pkg doc.Package
+	return pkg.Synopsis(cg.Text())
+}
+
+// typeQualifier renders package-qualified types as "pkg.Name" (short package
+// name), matching prettyName's receiver rendering — never the full import path.
+func typeQualifier(p *types.Package) string { return p.Name() }
+
+// signatureOf renders a types.Signature into the contract's Param/Result form.
+// Parameter names are kept; result names are dropped (the type is the signal).
+func signatureOf(sig *types.Signature) *contract.Signature {
+	out := &contract.Signature{Params: []contract.Param{}, Results: []contract.Result{}}
+	if params := sig.Params(); params != nil {
+		for i := 0; i < params.Len(); i++ {
+			v := params.At(i)
+			out.Params = append(out.Params, contract.Param{
+				Name: v.Name(),
+				Type: types.TypeString(v.Type(), typeQualifier),
+			})
+		}
+	}
+	if results := sig.Results(); results != nil {
+		for i := 0; i < results.Len(); i++ {
+			out.Results = append(out.Results, contract.Result{
+				Type: types.TypeString(results.At(i).Type(), typeQualifier),
+			})
+		}
+	}
+	return out
 }
 
 // moduledPath returns the main module's import path from the loaded packages,

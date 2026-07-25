@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/robot-accomplice/magma/internal/architext"
 	"github.com/robot-accomplice/magma/internal/contract"
 )
 
@@ -298,6 +300,23 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
+// --architext sets opts.architext; a bare flag leaves architextDir empty
+// (falling back to the repo-relative default in run), while --architext=DIR
+// captures the override.
+func TestParseArgsArchitextFlag(t *testing.T) {
+	o := parseArgs([]string{"--architext", "repo", "name", "out"})
+	if !o.architext {
+		t.Error("--architext should set architext=true")
+	}
+	if o.architextDir != "" {
+		t.Errorf("bare --architext should leave architextDir empty (default), got %q", o.architextDir)
+	}
+	o2 := parseArgs([]string{"--architext=/tmp/x", "repo", "name", "out"})
+	if o2.architextDir != "/tmp/x" {
+		t.Errorf("architextDir = %q, want /tmp/x", o2.architextDir)
+	}
+}
+
 // The usage screen must show the version, explain every argument (not just name
 // them), name the flags, and carry a runnable example — the gaps the minimal
 // version left.
@@ -312,8 +331,9 @@ func TestUsageTextIsInformative(t *testing.T) {
 		"vault",  // <vault-path> explained
 		"--force", "--help", "--version",
 		"--depth", "--from", "--hotspots", "--graph-link", // new walk/display flags
-		"EXAMPLE",    // a runnable example
-		"graph.json", // what it produces
+		"--architext", // code-graph emitter flag
+		"EXAMPLE",     // a runnable example
+		"graph.json",  // what it produces
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("usage text missing %q", want)
@@ -453,10 +473,45 @@ func TestIsFresh(t *testing.T) {
 				}
 			}
 			meta := contract.Meta{Tree: c.metaTree, Generator: c.metaGen}
-			if got := isFresh(out, meta); got != c.wantFresh {
+			if got := isFresh(out, meta, false); got != c.wantFresh {
 				t.Errorf("isFresh = %v, want %v", got, c.wantFresh)
 			}
 		})
+	}
+}
+
+// isFresh must rebuild (return false) when architext output was requested but
+// the vault's .magma/code-graph.json mirror is missing, even though the other
+// three JSON artifacts and the manifest are otherwise fresh — a map built
+// before --architext was added must not be silently accepted as covering it.
+func TestIsFreshRequiresArchitextWhenRequested(t *testing.T) {
+	out := t.TempDir()
+	dataDir := filepath.Join(out, ".magma")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(dataDir, "graph.json"),
+		map[string]any{"tree": "abc123", "generator": "magma/0.1.0", "computable": true})
+	writeJSONFile(t, filepath.Join(dataDir, "_dead.json"), map[string]any{"tree": "abc123"})
+	writeJSONFile(t, filepath.Join(dataDir, "_test-only.json"), map[string]any{"tree": "abc123"})
+	writeJSONFile(t, filepath.Join(dataDir, "manifest.json"), []string{"Overview.md"})
+	if err := os.WriteFile(filepath.Join(out, "Overview.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	meta := contract.Meta{Tree: "abc123", Generator: "magma/0.1.0"}
+
+	if !isFresh(out, meta, false) {
+		t.Error("map should be fresh when architext isn't requested")
+	}
+	if isFresh(out, meta, true) {
+		t.Error("map must not be fresh when architext is requested but code-graph.json is missing")
+	}
+
+	if err := os.WriteFile(filepath.Join(dataDir, architext.FileName), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !isFresh(out, meta, true) {
+		t.Error("map should be fresh once code-graph.json exists and architext is requested")
 	}
 }
 
@@ -491,6 +546,93 @@ func TestRunSkipsFreshMapAndForceRegenerates(t *testing.T) {
 	}
 	if hasSentinel(t, graphPath) {
 		t.Error("--force did not rebuild the map (sentinel survived)")
+	}
+}
+
+// --architext (via runOpts.architext) must dual-write code-graph.json to the
+// repo's docs/architext/data/ AND the vault's hidden .magma/ mirror, for a
+// computable graph.
+func TestRunArchitextFlagEmitsCodeGraph(t *testing.T) {
+	repo := gitRepo(t, map[string]string{
+		"go.mod":  "module tmpmod\n\ngo 1.21\n",
+		"main.go": "package main\n\nfunc main() { Live() }\n\nfunc Live() {}\n\nfunc Dead() {}\n",
+	})
+	outRoot := t.TempDir()
+	if err := run(repo, "proj", outRoot, runOpts{architext: true}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	repoDest := filepath.Join(repo, "docs", "architext", "data", architext.FileName)
+	vaultDest := filepath.Join(outRoot, "proj", ".magma", architext.FileName)
+	for _, p := range []string{repoDest, vaultDest} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("reading %s: %v", p, err)
+		}
+		if !strings.Contains(string(b), `"contract_version": "magma-code-graph/1"`) {
+			t.Errorf("%s missing contract_version stamp:\n%s", p, b)
+		}
+	}
+}
+
+// Emission must also happen on the refusal path (unsupported language): an
+// honest refused code-graph is required, mirroring how the other refused
+// artifacts (graph.json, _dead.json, ...) are always written even on refusal.
+func TestRunArchitextFlagEmitsOnRefusal(t *testing.T) {
+	repo := gitRepo(t, map[string]string{"README.md": "no build manifest here\n"})
+	outRoot := t.TempDir()
+
+	if err := run(repo, "proj", outRoot, runOpts{architext: true}); err == nil {
+		t.Fatal("run on an unknown-language repo must return an error")
+	}
+
+	repoDest := filepath.Join(repo, "docs", "architext", "data", architext.FileName)
+	vaultDest := filepath.Join(outRoot, "proj", ".magma", architext.FileName)
+	for _, p := range []string{repoDest, vaultDest} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("reading %s: %v", p, err)
+		}
+		if !strings.Contains(string(b), `"contract_version": "magma-code-graph/1"`) {
+			t.Errorf("%s missing contract_version stamp:\n%s", p, b)
+		}
+		if !strings.Contains(string(b), `"computable": false`) {
+			t.Errorf("%s should be a refused code-graph (computable:false), got:\n%s", p, b)
+		}
+	}
+}
+
+// The artifact --architext writes into the repo (docs/architext/data/) is
+// untracked on disk, so a naive dirty check would see it on the SECOND run and
+// stamp tree: "<sha>-dirty" — flipping the otherwise-deterministic envelope.
+// Running twice against a clean, committed fixture must produce byte-identical
+// repo-side code-graph.json output both times.
+func TestArchitextEmissionIsDeterministicAcrossRuns(t *testing.T) {
+	repo := gitRepo(t, map[string]string{
+		"go.mod":  "module tmpmod\n\ngo 1.21\n",
+		"main.go": "package main\n\nfunc main() { Live() }\n\nfunc Live() {}\n\nfunc Dead() {}\n",
+	})
+	outRoot := t.TempDir()
+	repoDest := filepath.Join(repo, "docs", "architext", "data", architext.FileName)
+
+	if err := run(repo, "proj", outRoot, runOpts{architext: true}); err != nil {
+		t.Fatalf("run (first): %v", err)
+	}
+	first, err := os.ReadFile(repoDest)
+	if err != nil {
+		t.Fatalf("reading %s after first run: %v", repoDest, err)
+	}
+
+	if err := run(repo, "proj", outRoot, runOpts{architext: true}); err != nil {
+		t.Fatalf("run (second): %v", err)
+	}
+	second, err := os.ReadFile(repoDest)
+	if err != nil {
+		t.Fatalf("reading %s after second run: %v", repoDest, err)
+	}
+
+	if !bytes.Equal(first, second) {
+		t.Errorf("two --architext runs produced different bytes:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 }
 
