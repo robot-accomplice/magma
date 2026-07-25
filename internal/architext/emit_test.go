@@ -45,6 +45,38 @@ func TestEmitFineTier(t *testing.T) {
 	}
 }
 
+func TestEmitTranslatesTreeToStateEnum(t *testing.T) {
+	// magma's internal Meta.Tree is "<sha>" / "<sha>-dirty" (a v0.1.0 convention the
+	// graph.json contract and the audit gate depend on). The code-graph contract's
+	// `tree` is the STATE enum "clean"|"dirty" — the sha travels in `sha`. The
+	// adapter must translate; passing the stamp through verbatim emits an invalid
+	// artifact that Architext's schema rejects on the enum.
+	clean := sampleGraph()
+	clean.Tree = "b80c095"
+	if got := Emit(clean).Tree; got != "clean" {
+		t.Errorf("tree = %q, want \"clean\" for an unsuffixed stamp", got)
+	}
+	if got := Emit(clean).SHA; got != clean.SHA {
+		t.Errorf("sha = %q, want %q — the sha must still travel in its own field", got, clean.SHA)
+	}
+
+	dirty := sampleGraph()
+	dirty.Tree = "b80c095-dirty"
+	if got := Emit(dirty).Tree; got != "dirty" {
+		t.Errorf("tree = %q, want \"dirty\" for a -dirty stamp", got)
+	}
+
+	// A REFUSED artifact carries the same envelope (built before the early return),
+	// so it must satisfy the enum too — Architext validates refusals as valid data.
+	refused := contract.Graph{
+		ContractVersion: contract.GraphVersion, SHA: "b80c095", Tree: "b80c095-dirty",
+		Language: "python", Computable: false, NotComputableReason: "unsupported language: python",
+	}
+	if got := Emit(refused).Tree; got != "dirty" {
+		t.Errorf("refused artifact tree = %q, want \"dirty\"", got)
+	}
+}
+
 func TestEmitRefusal(t *testing.T) {
 	g := contract.Graph{ContractVersion: contract.GraphVersion, Language: "python", Computable: false, NotComputableReason: "unsupported language: python"}
 	cg := Emit(g)
