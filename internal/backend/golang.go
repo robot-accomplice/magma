@@ -213,7 +213,7 @@ func collectNodes(
 					continue // a test variant of an already-seen declaration
 				}
 				seen[posn] = true
-				decls = append(decls, decl{fn: fn, obj: obj, doc: doc.Synopsis(fd.Doc.Text())})
+				decls = append(decls, decl{fn: fn, obj: obj, doc: synopsis(fd.Doc)})
 			}
 		}
 	})
@@ -330,6 +330,18 @@ func prettyName(fn *ssa.Function) string {
 		}
 	}
 	return name
+}
+
+// synopsis returns the first sentence of a declaration's doc comment, or "" when
+// there is none (a nil CommentGroup yields empty text). It calls the method on a
+// zero-value doc.Package rather than the package-level doc.Synopsis, which is
+// deprecated as of Go 1.20: that function is itself defined as this exact call, so
+// the result is unchanged. A doc.Package built from real files would additionally
+// resolve doc links, which does not apply here — the synopsis is stored as plain
+// metadata, never rendered as Go doc.
+func synopsis(cg *ast.CommentGroup) string {
+	var pkg doc.Package
+	return pkg.Synopsis(cg.Text())
 }
 
 // typeQualifier renders package-qualified types as "pkg.Name" (short package
