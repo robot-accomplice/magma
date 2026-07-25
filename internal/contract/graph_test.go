@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -137,6 +138,44 @@ func TestWriteGraphSortsAndWrites(t *testing.T) {
 		if out.Edges[i].From != want[i].From || out.Edges[i].To != want[i].To {
 			t.Errorf("edge %d = (%d,%d), want (%d,%d)", i, out.Edges[i].From, out.Edges[i].To, want[i].From, want[i].To)
 		}
+	}
+}
+
+func TestNodeSignatureMarshals(t *testing.T) {
+	n := Node{
+		ID: 0, Symbol: "Add", Pkg: "sigmod", Kind: "func",
+		Signature: &Signature{
+			Params:  []Param{{Name: "a", Type: "int"}, {Name: "b", Type: "int"}},
+			Results: []Result{{Type: "int"}},
+		},
+		Doc: "Add returns the sum of a and b.", FanIn: 1, FanOut: 0,
+	}
+	b, err := json.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, want := range []string{`"signature"`, `"a"`, `"fan_in":1`, `"doc":"Add returns the sum of a and b."`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marshalled node missing %s\ngot: %s", want, got)
+		}
+	}
+}
+
+func TestReachabilityPredicates(t *testing.T) {
+	dead := Node{Reachable: false, Generated: false, Root: false}
+	if !dead.IsDead() {
+		t.Error("unreachable, non-generated, non-root node should be dead")
+	}
+	if (Node{Reachable: false, Root: true}).IsDead() {
+		t.Error("a root is reachable by definition; never dead")
+	}
+	testOnly := Node{Reachable: true, ProdReachable: false, Test: false, Root: false, Generated: false}
+	if !testOnly.IsTestOnly() {
+		t.Error("reachable-but-not-prod, non-test production node should be test-only")
+	}
+	if (Node{Reachable: true, ProdReachable: false, Test: true}).IsTestOnly() {
+		t.Error("a function declared in a test file is test code, not test-only production code")
 	}
 }
 
