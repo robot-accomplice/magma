@@ -93,7 +93,10 @@ fn push(
             test: f.is_test(db),
             root: false,   // Task 5
             bench: f.is_bench(db),
-            generated: false, // Task 7
+            generated: {
+                let p = vfs.file_path(file_id).to_string();
+                p.contains("/target/") || p.contains("/build/")
+            },
             signature: model::Signature { params, results },
             doc,
         },

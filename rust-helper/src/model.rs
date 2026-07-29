@@ -82,3 +82,22 @@ pub struct Call {
     /// call goes through `dyn Trait` and the concrete impl is chosen at runtime.
     pub kind: String,
 }
+
+/// Emitted instead of Output when analysis cannot proceed. magma turns this
+/// into a refused graph — never a partial or degraded map.
+#[derive(Serialize)]
+pub struct Refusal {
+    pub contract_version: String,
+    pub computable: bool,
+    pub reason: String,
+}
+
+impl Refusal {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Refusal {
+            contract_version: CONTRACT_VERSION.to_owned(),
+            computable: false,
+            reason: reason.into(),
+        }
+    }
+}
