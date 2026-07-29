@@ -7,7 +7,7 @@ fn main() {
     gen_call(42i32);
     macro_caller!();
 }
-fn live() { helper(); }
+fn live() { helper(); helper(); }   // called TWICE — must dedup to ONE edge
 fn helper() {}
 fn dead() {}
 fn only_test() {}

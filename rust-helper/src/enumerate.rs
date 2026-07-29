@@ -9,7 +9,7 @@ use ra_ap_ide_db::RootDatabase;
 use ra_ap_paths::AbsPath;
 use ra_ap_syntax::ast::HasName;
 use ra_ap_syntax::AstNode;
-use ra_ap_vfs::Vfs;
+use ra_ap_vfs::{FileId, Vfs};
 
 use crate::model;
 
@@ -62,13 +62,7 @@ fn push(
         .line_col(name_node.syntax().text_range().start())
         .line;
 
-    let file = match vfs.file_path(file_id).as_path() {
-        Some(abs) => match abs.strip_prefix(root) {
-            Some(rel) => rel.as_str().to_owned(),
-            None => abs.to_string(),
-        },
-        None => vfs.file_path(file_id).to_string(),
-    };
+    let file = repo_relative_path(vfs, root, file_id);
 
     let display_target = DisplayTarget::from_crate(db, f.module(db).krate(db).into());
     let params: Vec<model::Param> = f
@@ -105,6 +99,18 @@ fn push(
         },
         f,
     ));
+}
+
+/// Repo-relative path for `file_id`, computed the same way for node metadata
+/// (here) and edge call-site metadata (walk.rs) — the two must agree.
+pub(crate) fn repo_relative_path(vfs: &Vfs, root: &AbsPath, file_id: FileId) -> String {
+    match vfs.file_path(file_id).as_path() {
+        Some(abs) => match abs.strip_prefix(root) {
+            Some(rel) => rel.as_str().to_owned(),
+            None => abs.to_string(),
+        },
+        None => vfs.file_path(file_id).to_string(),
+    }
 }
 
 /// First sentence of a doc comment — a pointer, not a payload. Mirrors Go's

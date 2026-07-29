@@ -2,13 +2,14 @@
 // Compares against outgoing_calls. usage: helper <root> [--outgoing]
 mod enumerate;
 mod model;
+mod walk;
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
 use ra_ap_cfg::{CfgAtom, CfgDiff};
-use ra_ap_hir::{HasSource, ModuleDef, PathResolution, Semantics};
+use ra_ap_hir::{HasSource, Semantics};
 use ra_ap_ide::{AnalysisHost, CallHierarchyConfig, FilePosition};
 use ra_ap_ide_db::ra_fixture::RaFixtureConfig;
 use ra_ap_ide_db::RootDatabase;
@@ -16,8 +17,8 @@ use ra_ap_intern::sym;
 use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
 use ra_ap_paths::AbsPathBuf;
 use ra_ap_project_model::{CargoConfig, CfgOverrides};
-use ra_ap_syntax::ast::{self, HasName};
-use ra_ap_syntax::{AstNode, SyntaxNode};
+use ra_ap_syntax::ast::HasName;
+use ra_ap_syntax::AstNode;
 
 fn main() -> anyhow::Result<()> {
     let root = std::env::args().nth(1).expect("usage: helper <workspace-root>");
@@ -83,28 +84,11 @@ fn main() -> anyhow::Result<()> {
         // thread. Analysis::with_db does this internally; using Semantics directly
         // does not, and inference panics with "Try to use attached db, but not db
         // is attached".
-        edges = ra_ap_hir::attach_db(db, || {
+        calls = ra_ap_hir::attach_db(db, || {
             let sema = Semantics::new(db);
-            let mut n_edges = 0usize;
-            for (i, (_mf, f)) in funcs.iter().enumerate() {
-                let Some(src) = f.source(db) else { continue };
-                if let Some(efid) = src.file_id.file_id() {
-                    let _ = sema.parse(efid);
-                }
-                let Some(body) = src.value.body() else { continue };
-                let mut targets = Vec::new();
-                walk(&sema, body.syntax(), &mut targets, 0);
-                for t in &targets {
-                    // Calls into dependencies are out of scope (CrateOrigin::Local
-                    // filter means `index` only has local functions).
-                    if let Some(&to_id) = index.get(t) {
-                        calls.push(model::Call { from: i as u32, to: to_id });
-                    }
-                }
-                n_edges += targets.len();
-            }
-            n_edges
+            walk::edges(&sema, db, &vfs, root_abs.as_path(), &funcs, &index)
         });
+        edges = calls.len();
         eprintln!("MODE semantics+macro-descent");
     }
     eprintln!("TIMING edges: {:.1}s for {} edges", t2.elapsed().as_secs_f64(), edges);
@@ -116,42 +100,6 @@ fn main() -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&out)?);
     }
     Ok(())
-}
-
-/// Walk a body, resolving calls. Descends into macro expansions — the thing
-/// outgoing_calls fails to do, which caused false dead code for macro targets.
-fn walk(
-    sema: &Semantics<'_, RootDatabase>,
-    node: &SyntaxNode,
-    out: &mut Vec<ra_ap_hir::Function>,
-    depth: usize,
-) {
-    if depth > 8 {
-        return; // guard against pathological macro recursion
-    }
-    for n in node.descendants() {
-        if let Some(mc) = ast::MacroCall::cast(n.clone()) {
-            if let Some(exp) = sema.expand_macro_call(&mc) {
-                walk(sema, &exp.value, out, depth + 1);
-            }
-        }
-        if let Some(call) = ast::CallExpr::cast(n.clone()) {
-            if let Some(ast::Expr::PathExpr(pe)) = call.expr() {
-                if let Some(path) = pe.path() {
-                    if let Some(PathResolution::Def(ModuleDef::Function(f))) =
-                        sema.resolve_path(&path)
-                    {
-                        out.push(f);
-                    }
-                }
-            }
-        }
-        if let Some(mcall) = ast::MethodCallExpr::cast(n.clone()) {
-            if let Some(f) = sema.resolve_method_call(&mcall) {
-                out.push(f);
-            }
-        }
-    }
 }
 
 fn pos_of(db: &RootDatabase, f: ra_ap_hir::Function) -> Option<FilePosition> {
