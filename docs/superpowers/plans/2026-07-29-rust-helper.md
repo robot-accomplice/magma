@@ -1059,3 +1059,60 @@ git commit -m "test(rust-helper): oracle diff harness + recorded parity results"
 **3. Type consistency.** `model::Function` grows in Tasks 1→2→3 and is referenced by that name throughout; `model::Call` grows in 1→4. `enumerate::collect` returns `Vec<(model::Function, ra_ap_hir::Function)>`, which `roots::mark` mutates and `walk::edges` consumes — consistent across Tasks 2, 4, 5. `CONTRACT_VERSION` is defined once in Task 1 and reused by `Refusal` in Task 7.
 
 **One known risk, stated rather than hidden:** exact `ra_ap_*` method names (`self_param`, `visibility`, `params_without_self`, `ret_type`, `docs`, `line_index`, `file_path`, `path_to_root`, `DisplayTarget`) are written from the 0.0.343 source but were not all compiled during planning. Tasks 2 and 3 carry an explicit instruction to grep the vendored source rather than guess or silently drop a field. This is the API-churn cost the operator accepted.
+
+---
+
+### Task 9: Enumerate trait *declaration* methods (false dead code)
+
+**Found during Task 5's fix loop; routed here because it is an enumeration defect, not a
+root-flagging one.** `enumerate::collect` walks only `Module::declarations` (free functions) and
+`Module::impl_defs` (impl methods). A trait's own declared methods are never enumerated, so a
+default-bodied trait method is invisible — **and so are its outgoing calls**.
+
+Reproduced against the oracle:
+
+```rust
+pub trait Tr { fn m(&self) { helper(); } }
+fn helper() {}
+```
+`cargo check` emits **zero** warnings — rustc treats `helper` as live via `Tr::m`'s default body.
+The helper emits `helper` with no incoming edge and **zero** calls: `Tr::m` was never enumerated,
+so the `Tr::m → helper` edge does not exist. Direction: **false dead code**.
+
+**Files:** `rust-helper/src/enumerate.rs`; new fixture `rust-helper/testdata/traitdecl/`.
+
+Enumerate trait-declaration methods alongside impl methods. Grep the vendored source for the
+trait's associated-items query (candidate: `Trait::items(db)` → `AssocItem::Function`) before
+using it. Two things must both hold: the method appears as a node, and the body walker reaches its
+default body so the outgoing edge is emitted.
+
+Verification: the fixture above must yield an edge `Tr::m → helper`, and `helper` must not be
+reported dead. Also confirm a trait method with **no** default body (`fn m(&self);`) is handled
+sensibly — it has no body, so it emits no edges, and marking it a node with zero outgoing edges is
+correct rather than a bug.
+
+### Task 10: Trait impls on non-`Adt` self types (false dead code)
+
+**Found during Task 5's fix loop, outside that task's required matrix.** `is_public_method`
+requires `imp.self_ty(db).as_adt()` to succeed, which returns `None` for builtins, tuples, and
+references. The `all_ancestors_public` fallback then requires `f.visibility(db) == Visibility::Public`,
+which — per Task 5's root-cause finding — a trait-impl method can **never** satisfy.
+
+Reproduced against the oracle:
+
+```rust
+pub trait Tr2 { fn m2(&self); }
+impl Tr2 for i32 { fn m2(&self) {} }
+```
+`cargo check` emits zero warnings (a public trait's impl is public API regardless of self-type
+shape); the helper reports `m2` → `root: false`. Direction: **false dead code**.
+
+**Files:** `rust-helper/src/roots.rs`; extend `rust-helper/testdata/libonly/`.
+
+For a **trait** impl, the self type's shape should not gate root status at all — if the trait is
+publicly reachable and the impl exists in this workspace, the method is public API. Note the
+orphan rule means a non-`Adt` self type can only appear in a trait impl, so this is precisely the
+case where the `as_adt()` requirement is wrong.
+
+Verification: `impl Tr2 for i32` → `m2` **root: true** (oracle silent); a private trait's impl on
+`i32` → **root: false** (oracle warns); and Task 5's full 7-case matrix must still pass unchanged.
