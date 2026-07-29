@@ -380,3 +380,39 @@ stderr note on every run naming this limitation and Tasks 9/11 directly, so a ba
 cannot be read as "full parity" without it. Full harness design, fixture transcripts, and the
 cascade-suppression and blind-spot root-cause chains are in
 `.superpowers/sdd/2026-07-29-rust-helper/task-8-report.md`.
+
+## 9. Post-implementation re-measurement — the sysroot bug and its cost
+
+Every performance and coverage number recorded above (§7) was taken **before** a defect found
+during implementation: `CargoConfig::default().sysroot` is `None`, so no sysroot was loaded and
+std/core `macro_rules!` items (`println!`, `format!`, `write!`, `vec!`, `assert!`, `matches!`)
+could not resolve. `Semantics::expand_macro_call` cannot expand a macro it cannot resolve, so
+**every call reachable only through a std macro was silently invisible** — in any position.
+
+Fixture tests could not catch this: fixtures use *local* `macro_rules!`, which resolved fine.
+Only a fixture requiring `env!`/`concat!`/`include!` exposed it.
+
+Re-measured on roboticus-rust (575k lines) with `sysroot = Some(RustLibSource::Discover)`:
+
+| | before fix | after fix | delta |
+|---|---|---|---|
+| functions | 8,437 | **10,651** | +2,214 (+26%) |
+| edges | 12,352 | **20,268** | +7,916 (**+64%**) |
+| load | 1.8s | 80.1s | 44× |
+| enumerate | 15.2s | 45.6s | 3× |
+| edges | 31.4s | 186.8s | 6× |
+| **total** | 48.4s | **312.5s** | **6.5×** |
+
+**The pre-fix graph was missing roughly 39% of all edges.** Every one of those was a potential
+false-dead-code source, which is why the fix is not optional under the full-parity bar.
+
+**But §7's conclusion that "48s is acceptable for a pre-audit step" no longer holds.** First-run
+cost on a large workspace is now **5.2 minutes**; freshness-skip still makes re-runs at an
+unchanged clean SHA free. For comparison, Go maps a similarly-sized repo in ~15s — Rust is now
+roughly 20× slower per function.
+
+Two things follow, and both are operator decisions rather than implementation details:
+
+1. The "near-free to run before every task" value proposition needs restating for Rust, or
+2. The 80s sysroot load — the single largest new cost, and a fixed overhead independent of repo
+   size — needs investigation (it may be cacheable across runs).
