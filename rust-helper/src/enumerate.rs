@@ -33,6 +33,13 @@ pub fn collect(
                 if let ModuleDef::Function(f) = decl {
                     push(db, vfs, root, f, &mut out);
                 }
+                if let ModuleDef::Trait(tr) = decl {
+                    for item in tr.items(db) {
+                        if let AssocItem::Function(f) = item {
+                            push(db, vfs, root, f, &mut out);
+                        }
+                    }
+                }
             }
             for imp in module.impl_defs(db) {
                 for item in imp.items(db) {

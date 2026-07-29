@@ -12,3 +12,4 @@ cover.out
 /rust-helper/testdata/fixture/target/
 /rust-helper/testdata/libonly/target/
 /rust-helper/testdata/multi_impl/target/
+/rust-helper/testdata/traitdecl/target/
