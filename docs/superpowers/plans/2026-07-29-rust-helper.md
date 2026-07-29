@@ -1150,3 +1150,34 @@ these nodes so magma's views can exclude them the way Go excludes cgo output.
 Verification: the fixture must emit an edge `generated_fn → production_callee`, `production_callee`
 must not be reported dead, and the generated node must carry `generated: true`. `testdata/fixture`
 (11 fns / 8 calls), `multi_impl`, and `libonly` must all be unchanged.
+
+### Task 12: Resolve calls nested in macro *arguments* (false dead code)
+
+**Found during Task 8's re-review; pre-existing, and out of that task's harness-only scope.**
+The walker descends into macro *expansions* (Task 4/6), but a call written as a macro **argument**
+yields no edge:
+
+```rust
+println!("{}", foo());   // -> ZERO edges to foo
+```
+
+Confirmed with a trivial repro independent of any test-module context. Moving the call to its own
+statement before the `println!` resolves normally, which isolates the gap to argument position.
+
+Direction: **false dead code** — `foo` gets no incoming edge and is reported dead while rustc
+considers it live. This matters because calls inside macro arguments are pervasive: `println!`,
+`format!`, `assert_eq!`, `vec!`, `write!`, and every logging macro.
+
+**Files:** `rust-helper/src/walk.rs`; new fixture `rust-helper/testdata/macroarg/`.
+
+The unexpanded AST holds the macro's arguments as a token tree rather than parsed expressions, so
+`ast::CallExpr::cast` never matches them. Investigate whether descending into the expansion
+surfaces the argument call (it should — the expansion contains the call), and if the current
+descent is missing it, why: candidate causes are `expand_macro_call` returning a node whose
+argument sub-expressions do not map back through `Semantics` resolution, or the resolution being
+attempted against the unexpanded token rather than the expanded one. Grep the vendored source for
+`descend_into_macros*` variants — one of them may be the intended tool for exactly this mapping.
+
+Verification: the fixture must emit an edge to `foo` from a function containing
+`println!("{}", foo())`, and `foo` must not be reported dead. Existing fixtures unchanged
+(`fixture` 11 fns / 8 calls, `multi_impl`, `libonly`), and the oracle harness must stay FATAL=0.
