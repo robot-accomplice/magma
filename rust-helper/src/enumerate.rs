@@ -1,6 +1,9 @@
 //! Workspace-local function discovery with full node metadata.
 
-use ra_ap_hir::{AssocItem, Crate, HasSource, HasVisibility, ModuleDef, Visibility};
+use ra_ap_hir::{
+    AssocItem, Crate, DisplayTarget, HasAttrs, HasSource, HasVisibility, HirDisplay, ModuleDef,
+    Visibility,
+};
 use ra_ap_ide_db::base_db::CrateOrigin;
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_paths::AbsPath;
@@ -67,6 +70,22 @@ fn push(
         None => vfs.file_path(file_id).to_string(),
     };
 
+    let display_target = DisplayTarget::from_crate(db, f.module(db).krate(db).into());
+    let params: Vec<model::Param> = f
+        .params_without_self(db)
+        .into_iter()
+        .map(|p| model::Param {
+            name: p.name(db).map(|n| n.as_str().to_owned()),
+            ty: p.ty().display(db, display_target).to_string(),
+        })
+        .collect();
+    let ret_str = f.ret_type(db).display(db, display_target).to_string();
+    // Rust always has exactly one return type; "()" means no meaningful result,
+    // which magma represents as an empty results list (matching Go's no-return).
+    let results =
+        if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
+    let doc = f.hir_docs(db).map(|d| first_sentence(d.docs()));
+
     let id = out.len() as u32;
     out.push((
         model::Function {
@@ -81,9 +100,21 @@ fn push(
             root: false,   // Task 5
             bench: f.is_bench(db),
             generated: false, // Task 7
+            signature: model::Signature { params, results },
+            doc,
         },
         f,
     ));
+}
+
+/// First sentence of a doc comment — a pointer, not a payload. Mirrors Go's
+/// use of doc.Synopsis.
+fn first_sentence(text: &str) -> String {
+    let trimmed = text.trim();
+    match trimmed.find(". ") {
+        Some(i) => trimmed[..=i].to_owned(),
+        None => trimmed.lines().next().unwrap_or("").trim_end_matches('.').to_owned() + ".",
+    }
 }
 
 /// "crate::module::path" for the function's containing module.

@@ -45,6 +45,27 @@ pub struct Function {
     pub bench: bool,
     /// Build-script- or macro-generated code.
     pub generated: bool,
+    pub signature: Signature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Signature {
+    pub params: Vec<Param>,
+    pub results: Vec<Result_>,
+}
+
+#[derive(Serialize)]
+pub struct Param {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub ty: String,
+}
+
+#[derive(Serialize)]
+pub struct Result_ {
+    pub ty: String,
 }
 
 /// One call edge. Endpoints are Function ids.
