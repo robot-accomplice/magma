@@ -2,7 +2,7 @@
 
 use ra_ap_hir::{
     AssocItem, Crate, DisplayTarget, HasAttrs, HasSource, HasVisibility, HirDisplay, ModuleDef,
-    Visibility,
+    Semantics, Visibility,
 };
 use ra_ap_ide_db::base_db::CrateOrigin;
 use ra_ap_ide_db::RootDatabase;
@@ -20,6 +20,7 @@ use crate::model;
 /// which floods the graph and produces false dead code.
 pub fn collect(
     db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
     vfs: &Vfs,
     root: &AbsPath,
 ) -> Vec<(model::Function, ra_ap_hir::Function)> {
@@ -31,12 +32,12 @@ pub fn collect(
         for module in krate.modules(db) {
             for decl in module.declarations(db) {
                 if let ModuleDef::Function(f) = decl {
-                    push(db, vfs, root, f, &mut out);
+                    push(db, sema, vfs, root, f, &mut out);
                 }
                 if let ModuleDef::Trait(tr) = decl {
                     for item in tr.items(db) {
                         if let AssocItem::Function(f) = item {
-                            push(db, vfs, root, f, &mut out);
+                            push(db, sema, vfs, root, f, &mut out);
                         }
                     }
                 }
@@ -44,7 +45,7 @@ pub fn collect(
             for imp in module.impl_defs(db) {
                 for item in imp.items(db) {
                     if let AssocItem::Function(f) = item {
-                        push(db, vfs, root, f, &mut out);
+                        push(db, sema, vfs, root, f, &mut out);
                     }
                 }
             }
@@ -55,6 +56,7 @@ pub fn collect(
 
 fn push(
     db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
     vfs: &Vfs,
     root: &AbsPath,
     f: ra_ap_hir::Function,
@@ -62,12 +64,37 @@ fn push(
 ) {
     let Some(src) = f.source(db) else { return };
     let Some(name_node) = src.value.name() else { return };
-    let Some(efid) = src.file_id.file_id() else { return };
-    let file_id = efid.file_id(db);
 
-    let line = ra_ap_ide_db::line_index(db, file_id)
-        .line_col(name_node.syntax().text_range().start())
-        .line;
+    // `src.file_id.file_id()` is None when the definition itself comes from
+    // macro expansion — notably `include!(concat!(env!("OUT_DIR"), ...))`,
+    // the standard build-script codegen pattern. Previously this bailed out
+    // entirely, silently dropping the node (and, since walk::edges only
+    // walks enumerated functions, every edge reachable through it) — magma
+    // then reported live generated code as dead. Instead, cache this
+    // function's macro-expansion tree into `sema` (parse_or_expand handles
+    // both a real file and a macro file uniformly) and ask Semantics to map
+    // the name node's position back out of the expansion. For `include!`
+    // this resolves via real span maps to the actual generated file and
+    // position; for other macro-item shapes it falls back to the macro call
+    // site — either way a human-navigable location, never a synthetic one.
+    let is_macro_origin = src.file_id.is_macro();
+    let (file_id, line) = match src.file_id.file_id() {
+        Some(efid) => {
+            let file_id = efid.file_id(db);
+            let line = ra_ap_ide_db::line_index(db, file_id)
+                .line_col(name_node.syntax().text_range().start())
+                .line;
+            (file_id, line)
+        }
+        None => {
+            sema.parse_or_expand(src.file_id);
+            let range = sema.original_range(name_node.syntax());
+            let file_id = range.file_id.file_id(db);
+            let line =
+                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start()).line;
+            (file_id, line)
+        }
+    };
 
     let file = repo_relative_path(vfs, root, file_id);
 
@@ -102,7 +129,7 @@ fn push(
             bench: f.is_bench(db),
             generated: {
                 let p = vfs.file_path(file_id).to_string();
-                p.contains("/target/") || p.contains("/build/")
+                is_macro_origin || p.contains("/target/") || p.contains("/build/")
             },
             signature: model::Signature { params, results },
             doc,

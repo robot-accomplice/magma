@@ -17,7 +17,7 @@ use ra_ap_ide_db::RootDatabase;
 use ra_ap_intern::sym;
 use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
 use ra_ap_paths::AbsPathBuf;
-use ra_ap_project_model::{CargoConfig, CfgOverrides};
+use ra_ap_project_model::{CargoConfig, CfgOverrides, RustLibSource};
 use ra_ap_syntax::ast::HasName;
 use ra_ap_syntax::AstNode;
 
@@ -27,6 +27,7 @@ fn main() -> anyhow::Result<()> {
     let t0 = Instant::now();
 
     let mut cargo_config = CargoConfig::default();
+    cargo_config.sysroot = Some(RustLibSource::Discover);
     cargo_config.cfg_overrides = CfgOverrides {
         global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
         selective: Default::default(),
@@ -55,7 +56,8 @@ fn main() -> anyhow::Result<()> {
     // Signature/type display requires the salsa db to be attached to this
     // thread (same requirement as the Semantics-based edge extraction below).
     let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
-        let mut funcs = enumerate::collect(db, &vfs, root_abs.as_path());
+        let sema = Semantics::new(db);
+        let mut funcs = enumerate::collect(db, &sema, &vfs, root_abs.as_path());
         roots::mark(db, &mut funcs);
         funcs
     });

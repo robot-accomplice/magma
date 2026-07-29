@@ -37,9 +37,13 @@ pub fn edges(
 
     for (node, f) in funcs {
         let Some(src) = f.source(db) else { continue };
-        if let Some(efid) = src.file_id.file_id() {
-            let _ = sema.parse(efid);
-        }
+        // Cache this function's tree into `sema` before touching its body:
+        // parse_or_expand handles a real file and a macro file uniformly, so
+        // this also covers functions enumerate.rs now accepts whose own
+        // definition comes from macro expansion (e.g. include!-generated
+        // code, Task 11) — without this, resolving calls inside their body
+        // below panics (Semantics::find_file: node not cached).
+        let _ = sema.parse_or_expand(src.file_id);
         let Some(body) = src.value.body() else { continue };
 
         let mut sites = Vec::new();
