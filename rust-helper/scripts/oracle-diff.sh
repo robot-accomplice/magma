@@ -51,22 +51,6 @@
 #     `impl Trait for Type {` line; low-confidence scans (hit an unrelated
 #     `}` before finding one) do NOT exclude — a spurious FATAL that a human
 #     dismisses is preferred over silently hiding a real one.
-#   - a method declared directly inside a `trait Name { .. }` body (Task 9:
-#     `enumerate.rs` now enumerates these). Empirically verified: rustc's
-#     dead_code lint, whether the method is default-bodied or bodyless,
-#     whether the trait is genuinely dead or genuinely live via some impl
-#     elsewhere, NEVER emits a diagnostic on the method's own declaration
-#     line — only ever one "trait `X` is never used" on the TRAIT's own
-#     line, and only when the whole trait is unreachable. So the method's
-#     own (file,line) key can carry no verdict either way — unlike the
-#     impl-cascade case above, this is not a narrowing of an
-#     independently-confirmed-dead pair, it is a structural gap in what the
-#     compiler can tell us per method. A live default body's OWN outgoing
-#     calls (e.g. `Tr::m`'s call to a free function) are NOT affected: the
-#     callee is a normal function with its own line, diagnosed normally.
-#     Detected the same way as the impl-cascade scan, by a bounded upward
-#     (or same-line, for a single-line `trait X { fn m(&self); }`) scan for
-#     the enclosing `trait Name {` header.
 set -euo pipefail
 
 REPO="${1:?usage: oracle-diff.sh <workspace-root>}"
@@ -199,7 +183,6 @@ MAX_SCAN=1000
 
 : > "$WORK/excluded-attrs.jsonl"
 : > "$WORK/impl-info.jsonl"
-: > "$WORK/decl-trait-info.jsonl"
 current_file=""
 lines=()
 while IFS=$'\t' read -r id file line kind; do
@@ -259,7 +242,7 @@ while IFS=$'\t' read -r id file line kind; do
       fi
       # Bash parameter-expansion removal (${l//[^{]/}) mis-parses a pattern
       # containing a literal `}` — verified directly: it returns garbage for
-      # closes (the whole line, near enough), not the `}` count. tr -dc
+      # closes (close to the whole line's length, not the `}` count). tr -dc
       # (delete all bytes NOT in the given set) has no such ambiguity.
       opens_n=$(tr -dc '{' <<<"$l" | wc -c)
       closes_n=$(tr -dc '}' <<<"$l" | wc -c)
@@ -271,74 +254,10 @@ while IFS=$'\t' read -r id file line kind; do
       jq -cn --argjson id "$id" --arg trait "$impl_trait" --arg type "$impl_type" \
         '{id: $id, trait: $trait, type: $type}' >> "$WORK/impl-info.jsonl"
     fi
-
-    # Trait-DECLARATION detection (Task 9): is this method declared directly
-    # inside a `trait Name { .. }` body, as opposed to an impl? Needed
-    # because when a trait is entirely unused, rustc's dead_code lint emits
-    # exactly ONE diagnostic, on the trait's OWN declaration line — never a
-    # separate one per declared method (verified directly: a default-bodied
-    # method inside a genuinely-dead trait produces only "trait `X` is never
-    # used", nothing at the method's own line — and when the trait IS used,
-    # via some impl elsewhere, there is no diagnostic at all, at any line).
-    # Either way the method's own (file,line) key can never independently
-    # confirm or deny its liveness, in either direction — every function
-    # found here is therefore excluded from the comparison below (see
-    # oracle-diff.jq), not compared with a substituted verdict.
-    #
-    # A line-oriented brace-depth scan (like the impl-cascade one above)
-    # cannot be reused as-is: it stops at the FIRST line matching the header
-    # regex, without checking whether that line's own brace is genuinely
-    # still open by the time scanning reaches the target — which silently
-    # misattributes a closed SIBLING block above (proven directly: without
-    # this check, testdata/libonly's `ReS::re_m` — an INHERENT-impl-style
-    # trait-impl method, not a trait-declaration one — was wrongly tagged
-    # with decl_trait="ReTr" by scanning past the already-closed
-    # `pub trait ReTr { .. }` above its enclosing `impl ReTr for ReS {`).
-    # Fixed with a proper reverse character-level brace match: scan
-    # characters back-to-front from just above the function's line (or, for
-    # a same-line "trait Name { fn m(&self); }" declaration, from its own
-    # line), counting `}` as descending one level and `{` as ascending one;
-    # the first `{` reached at level 0 is the true nearest enclosing scope,
-    # whatever it is — stop there unconditionally (a non-"trait" enclosing
-    # scope, e.g. "impl .. for .. {", correctly means "not a trait
-    # declaration method", not "keep looking further up").
-    decl_trait="$(TARGET_LINE="$line" perl -e '
-      my $target = $ENV{TARGET_LINE} + 0;
-      my @lines = <STDIN>;
-      my $cur = $lines[$target - 1] // "";
-      if ($cur =~ /^\s*(pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)/) {
-        print $2;
-        exit;
-      }
-      my $depth = 0;
-      for (my $ln = $target - 1; $ln >= 1 && $ln >= $target - 1000; $ln--) {
-        my $text = $lines[$ln - 1];
-        next unless defined $text;
-        for (my $i = length($text) - 1; $i >= 0; $i--) {
-          my $c = substr($text, $i, 1);
-          if ($c eq "}") {
-            $depth++;
-          } elsif ($c eq "{") {
-            if ($depth == 0) {
-              if ($text =~ /^\s*(pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)/) {
-                print $2;
-              }
-              exit;
-            }
-            $depth--;
-          }
-        }
-      }
-    ' < "$REPO_ABS/$file" 2>/dev/null)"
-    if [[ -n "$decl_trait" ]]; then
-      jq -cn --argjson id "$id" --arg trait "$decl_trait" \
-        '{id: $id, trait: $trait}' >> "$WORK/decl-trait-info.jsonl"
-    fi
   fi
 done < "$WORK/scan-targets.tsv"
 jq -s '.' "$WORK/excluded-attrs.jsonl" > "$WORK/excluded-attrs.json"
 jq -s '.' "$WORK/impl-info.jsonl" > "$WORK/impl-info.json"
-jq -s '.' "$WORK/decl-trait-info.jsonl" > "$WORK/decl-trait-info.json"
 
 echo "== computing reachability and diffing against oracle ==" >&2
 jq -nr \
@@ -346,7 +265,6 @@ jq -nr \
   --slurpfile oracle "$WORK/oracle-dead.json" \
   --slurpfile excluded "$WORK/excluded-attrs.json" \
   --slurpfile impl_info "$WORK/impl-info.json" \
-  --slurpfile decl_trait_info "$WORK/decl-trait-info.json" \
   --slurpfile dead_traits "$WORK/dead-traits.json" \
   --slurpfile dead_types "$WORK/dead-types.json" \
   -f "$SCRIPT_DIR/oracle-diff.jq" | tee "$WORK/report.txt"
@@ -357,6 +275,21 @@ echo "the helper never emits as a node is invisible here — neither FATAL nor" 
 echo "report-only, just absent — so FATAL:0 does not by itself mean full parity." >&2
 echo "Known enumeration gap: Task 11 (include!-generated code, e.g. OUT_DIR" >&2
 echo "build-script output)." >&2
+echo "" >&2
+echo "Known residual gap (Task 9): a trait-declaration method belonging to a" >&2
+echo "trait whose ENTIRE cluster (trait + every impl + every impl's self type)" >&2
+echo "is independently unreachable gets NO per-line dead_code diagnostic of" >&2
+echo "its own from rustc — only the trait-impl-cascade exclusion above (which" >&2
+echo "only ever applies to impl methods) intentionally normalises this same" >&2
+echo "compiler behaviour. A trait-declaration method is not covered by that" >&2
+echo "exclusion, so it can surface here as a FATAL even when the helper is" >&2
+echo "correct (verified against testdata/libonly's hidden_trait::HidTr::hid_m:" >&2
+echo "helper says dead, matching reality — nothing in the crate reaches" >&2
+echo "HidTr at all — but rustc's only diagnostic for the whole dead cluster is" >&2
+echo "\"trait \`HidTr\` is never used\" on the TRAIT's own line, never a second" >&2
+echo "one on hid_m's line). Left unsuppressed deliberately per project policy:" >&2
+echo "a disclosed FATAL that a human confirms is preferred over silently" >&2
+echo "widening what this measuring instrument excludes." >&2
 echo "A propagated false-dead-code effect (a live enumerated function whose only" >&2
 echo "caller is one of these invisible functions) IS still caught as a normal" >&2
 echo "FATAL entry for that caller; what's uncovered is the invisible function's" >&2
