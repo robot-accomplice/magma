@@ -103,12 +103,22 @@ fn walk(
                 match f.as_assoc_item(db).map(|assoc| assoc.container(db)) {
                     Some(AssocItemContainer::Trait(t)) => {
                         // `dyn Trait` receiver: resolve_method_call gives back the
-                        // trait's own declared function, which is never enumerated
-                        // (no node in `index`), so a direct edge would silently
-                        // vanish and invent dead code for every impl. Over-approximate
-                        // instead, mirroring Go's RTA: emit one dynamic edge to every
-                        // impl of this trait method in the workspace. Extra edges
-                        // under-report dead code (safe); missing edges invent it.
+                        // trait's own declared function `f` itself, not a concrete
+                        // impl. Over-approximate, mirroring Go's RTA: emit one
+                        // dynamic edge to every impl of this trait method in the
+                        // workspace. Extra edges under-report dead code (safe);
+                        // missing edges invent it.
+                        //
+                        // `f` (the declaration) is now ALSO enumerated as its own
+                        // node (Task 9), so it needs an edge of its own too: with
+                        // only the impl edges above, the declaration itself has
+                        // zero incoming edges and is falsely reported dead even
+                        // when rustc is silent (verified: `trait Speak { fn
+                        // speak(&self); }` dispatched via `&dyn Speak` — rustc
+                        // never warns, but pre-fix the helper marked `Speak::speak`
+                        // unreachable). Marked dynamic like the impl edges — it's
+                        // a dispatch, not a static call.
+                        out.push(site(sema, &n, f, true, db, vfs, root));
                         let name = f.name(db);
                         for imp in Impl::all_for_trait(db, t) {
                             for item in imp.items(db) {
