@@ -38,19 +38,36 @@
 #   - source carries #[allow(...dead_code...)], #[no_mangle], #[used], or
 #     #[export_name...] immediately above the function (attributes that make
 #     genuinely-dead code invisible to the lint by design)
-#   - a trait-impl method whose enclosing trait AND self type are BOTH
-#     independently reported dead_code by the oracle. Empirically verified
-#     (three isolated cargo-check probes, not assumed): rustc's dead_code
-#     lint DOES flag an individually-dead trait-impl method when its trait
-#     and type are otherwise live, but SUPPRESSES that per-method diagnostic
-#     when the trait+type are themselves already unreachable (reports only
-#     the trait/type, not each method — cascade suppression, presumably to
-#     avoid redundant noise once the whole cluster is flagged). Inherent-impl
-#     methods do NOT get this treatment (verified: struct+method both
-#     reported). Detected by a bounded upward brace-scan for the enclosing
-#     `impl Trait for Type {` line; low-confidence scans (hit an unrelated
-#     `}` before finding one) do NOT exclude — a spurious FATAL that a human
-#     dismisses is preferred over silently hiding a real one.
+#   - a trait-impl method whose enclosing trait is independently reported
+#     dead_code by the oracle, AND (the self type is independently reported
+#     dead_code too, OR the self type cannot receive its own dead_code
+#     diagnostic in the first place — a builtin like `i32`, or a type defined
+#     outside this workspace). Empirically verified (isolated cargo-check
+#     probes, not assumed): rustc's dead_code lint DOES flag an individually-
+#     dead trait-impl method when its trait and type are otherwise live, but
+#     SUPPRESSES that per-method diagnostic when the trait+type cluster is
+#     itself already unreachable (reports only the trait/type, not each
+#     method — cascade suppression, presumably to avoid redundant noise once
+#     the whole cluster is flagged). Inherent-impl methods do NOT get this
+#     treatment (verified: struct+method both reported).
+#
+#     Task 13: this used to key on the *bare name* of the trait/type scraped
+#     from rustc's diagnostic text via a source-scanning brace matcher here.
+#     Names collide within a crate (two `impl X for Y` blocks named `Amb` in
+#     different modules is enough), so a name-keyed gate could suppress a
+#     genuinely-live method that merely shared a name with a dead one — the
+#     exact divergence-hiding failure this measuring instrument exists to
+#     catch. The sound key is the (file, line) of the trait's and self type's
+#     own declarations, which rustc's diagnostics and the helper's `helper.json`
+#     (`functions[].trait_impl`, emitted by `enumerate.rs`) both address the
+#     same way and which cannot collide. That field also carries whether the
+#     self type is a workspace-local item at all (`self_type_decl` is absent
+#     for a builtin/foreign self type) — the builtin case a bare-name AND-gate
+#     could never satisfy, since e.g. `i32` never gets its own "never used"
+#     diagnostic no matter how dead the impl is. With the field present, no
+#     source scanning is needed here at all: the (file, line) keys are looked
+#     up directly against the same oracle-dead-span map used for the ordinary
+#     per-function check.
 set -euo pipefail
 
 REPO="${1:?usage: oracle-diff.sh <workspace-root>}"
@@ -153,39 +170,26 @@ jq -c 'select(.reason=="compiler-message")
   "$WORK/cargo.jsonl" > "$WORK/oracle-dead.jsonl"
 jq -s '.' "$WORK/oracle-dead.jsonl" > "$WORK/oracle-dead.json"
 
-# Trait/type names the oracle independently reports as dead_code — feeds the
-# trait-impl cascade-suppression check below.
-jq -r 'select(.reason=="compiler-message") | select(.message.code.code=="dead_code")
-       | .message.message | select(test("^trait `"))
-       | capture("^trait `(?<name>[A-Za-z_][A-Za-z0-9_]*)`").name' \
-  "$WORK/cargo.jsonl" | sort -u | jq -R -s 'split("\n") | map(select(length > 0))' \
-  > "$WORK/dead-traits.json"
-jq -r 'select(.reason=="compiler-message") | select(.message.code.code=="dead_code")
-       | .message.message | select(test("^(struct|enum|union) `"))
-       | capture("^(struct|enum|union) `(?<name>[A-Za-z_][A-Za-z0-9_]*)`").name' \
-  "$WORK/cargo.jsonl" | sort -u | jq -R -s 'split("\n") | map(select(length > 0))' \
-  > "$WORK/dead-types.json"
-
 # Attribute-based normalisation: for every non-generated, non-test function,
 # look at the source lines immediately above its declaration line for a
 # contiguous run of attributes/doc-comments, and flag it if that run contains
 # a liveness-affecting attribute. Grouped by file so each file is read once.
-echo "== scanning for liveness-affecting attributes and enclosing impls ==" >&2
+#
+# The trait-impl cascade-suppression check needs NO source scanning — Task 13
+# moved that to `enumerate.rs`, which emits each trait-impl method's own
+# `trait_impl.{trait_decl,self_type_decl}` (file, line) directly in
+# helper.json, computed from rustc's own HIR rather than scraped from source
+# text. oracle-diff.jq looks those up against the same oracle-dead-span map
+# built above — no separate scan, no name matching, no collision risk.
+echo "== scanning for liveness-affecting attributes ==" >&2
 jq -r '.functions[] | select(.generated | not) | select(.test | not)
-       | [.id, .file, .line, .kind] | @tsv' "$WORK/helper.json" \
+       | [.id, .file, .line] | @tsv' "$WORK/helper.json" \
   | sort -t $'\t' -k2,2 -k3,3n > "$WORK/scan-targets.tsv"
 
-# Upward scan is bounded per lookup: methods sit directly inside an impl
-# block, so the enclosing header is normally within a few dozen lines even in
-# a large file. Free functions (kind=func) are skipped entirely — they can
-# never be inside an impl block.
-MAX_SCAN=1000
-
 : > "$WORK/excluded-attrs.jsonl"
-: > "$WORK/impl-info.jsonl"
 current_file=""
 lines=()
-while IFS=$'\t' read -r id file line kind; do
+while IFS=$'\t' read -r id file line; do
   if [[ "$file" != "$current_file" ]]; then
     lines=()
     if [[ -f "$REPO_ABS/$file" ]]; then
@@ -221,52 +225,14 @@ while IFS=$'\t' read -r id file line kind; do
     jq -cn --argjson id "$id" --arg reason "$reason" '{id: $id, reason: $reason}' \
       >> "$WORK/excluded-attrs.jsonl"
   fi
-
-  if [[ "$kind" == "method" ]]; then
-    depth=0
-    j=$((line - 2))
-    scanned=0
-    impl_trait=""
-    impl_type=""
-    while (( j >= 0 )) && (( scanned < MAX_SCAN )); do
-      l="${lines[$j]:-}"
-      scanned=$((scanned + 1))
-      if (( depth == 0 )) && [[ "$l" =~ ^[[:space:]]*impl(\<[^\>]*\>)?[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[^{]*[[:space:]]for[[:space:]]+([A-Za-z_][A-Za-z0-9_:]*) ]]; then
-        impl_trait="${BASH_REMATCH[2]}"
-        raw_type="${BASH_REMATCH[3]}"
-        impl_type="${raw_type##*:}"
-        break
-      elif (( depth == 0 )) && [[ "$l" =~ ^[[:space:]]*impl(\<[^\>]*\>)?[[:space:]]+([A-Za-z_][A-Za-z0-9_]*) ]]; then
-        impl_type="${BASH_REMATCH[2]}"
-        break
-      fi
-      # Bash parameter-expansion removal (${l//[^{]/}) mis-parses a pattern
-      # containing a literal `}` — verified directly: it returns garbage for
-      # closes (close to the whole line's length, not the `}` count). tr -dc
-      # (delete all bytes NOT in the given set) has no such ambiguity.
-      opens_n=$(tr -dc '{' <<<"$l" | wc -c)
-      closes_n=$(tr -dc '}' <<<"$l" | wc -c)
-      depth=$(( depth + closes_n - opens_n ))
-      if (( depth < 0 )); then depth=0; fi
-      j=$((j - 1))
-    done
-    if [[ -n "$impl_trait" && -n "$impl_type" ]]; then
-      jq -cn --argjson id "$id" --arg trait "$impl_trait" --arg type "$impl_type" \
-        '{id: $id, trait: $trait, type: $type}' >> "$WORK/impl-info.jsonl"
-    fi
-  fi
 done < "$WORK/scan-targets.tsv"
 jq -s '.' "$WORK/excluded-attrs.jsonl" > "$WORK/excluded-attrs.json"
-jq -s '.' "$WORK/impl-info.jsonl" > "$WORK/impl-info.json"
 
 echo "== computing reachability and diffing against oracle ==" >&2
 jq -nr \
   --slurpfile helper "$WORK/helper.json" \
   --slurpfile oracle "$WORK/oracle-dead.json" \
   --slurpfile excluded "$WORK/excluded-attrs.json" \
-  --slurpfile impl_info "$WORK/impl-info.json" \
-  --slurpfile dead_traits "$WORK/dead-traits.json" \
-  --slurpfile dead_types "$WORK/dead-types.json" \
   -f "$SCRIPT_DIR/oracle-diff.jq" | tee "$WORK/report.txt"
 
 echo "" >&2

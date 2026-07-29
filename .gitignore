@@ -14,3 +14,4 @@ cover.out
 /rust-helper/testdata/multi_impl/target/
 /rust-helper/testdata/traitdecl/target/
 /rust-helper/testdata/buildgen/target/
+/rust-helper/testdata/collision/target/

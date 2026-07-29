@@ -3,34 +3,24 @@
 # line prefixed "SUMMARY " for scripted consumption.
 #
 # Inputs (all provided via --slurpfile from oracle-diff.sh):
-#   $helper      - [helper.json]                    functions + calls
-#   $oracle      - [{file, line}, ...]              oracle dead_code primary spans
-#   $excluded    - [{id, reason}, ...]              attribute-based exclusions
-#   $impl_info   - [{id, trait, type}, ...]          enclosing impl of each method (source-scanned)
-#   $dead_traits - ["TraitName", ...]                traits the oracle independently reports dead
-#   $dead_types  - ["TypeName", ...]                 types the oracle independently reports dead
+#   $helper   - [helper.json]           functions + calls (functions[].trait_impl
+#                                        carries each trait-impl method's own
+#                                        (file, line) cascade key — see enumerate.rs)
+#   $oracle   - [{file, line}, ...]     oracle dead_code primary spans
+#   $excluded - [{id, reason}, ...]     attribute-based exclusions
 
 def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
+def key(loc): loc.file + ":" + (loc.line|tostring);
 
 ($helper[0]) as $g
 | ($oracle[0] // []) as $oracle_spans
 | ($excluded[0] // []) as $attr_excl
-| ($impl_info[0] // []) as $impl_list
-| ($dead_traits[0] // []) as $dead_trait_list
-| ($dead_types[0] // []) as $dead_type_list
 
 # Oracle dead set as an O(1) lookup keyed by "file:line".
 | (reduce $oracle_spans[] as $s ({}; . + {($s.file + ":" + ($s.line|tostring)): true})) as $oracle_map
 
 # Attribute-exclusion reasons keyed by function id.
 | (reduce $attr_excl[] as $e ({}; . + {($e.id|tostring): $e.reason})) as $attr_map
-
-# Enclosing impl {trait, type} keyed by function id, and the oracle's
-# independently-dead trait/type name sets — together drive the trait-impl
-# cascade-suppression check (see the comment block in oracle-diff.sh).
-| (reduce $impl_list[] as $e ({}; . + {($e.id|tostring): $e})) as $impl_map
-| (reduce $dead_trait_list[] as $t ({}; . + {($t): true})) as $dead_trait_map
-| (reduce $dead_type_list[] as $t ({}; . + {($t): true})) as $dead_type_map
 
 # Adjacency list: from-id (string) -> unique [to-id, ...].
 | (reduce $g.calls[] as $c ({}; .[($c.from|tostring)] += [$c.to]))
@@ -54,8 +44,14 @@ def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
 | ($g.functions | map(
     . as $f
     | ($f.file + ":" + ($f.line|tostring)) as $key
-    | ($impl_map[($f.id|tostring)]) as $im
-    | ($im != null and ($dead_trait_map[$im.trait] // false) and ($dead_type_map[$im.type] // false)) as $cascade
+    | ($f.trait_impl) as $ti
+    # Trait-impl cascade (Task 13): sound because both sides are keyed on
+    # declaration (file, line), which cannot collide the way a bare name can.
+    | (if $ti == null then false else ($oracle_map[key($ti.trait_decl)] // false) end) as $trait_dead
+    | (if $ti == null then false else ($ti.self_type_decl == null) end) as $self_type_not_locally_eligible
+    | (if $ti == null or $ti.self_type_decl == null then false
+       else ($oracle_map[key($ti.self_type_decl)] // false) end) as $self_type_dead
+    | ($ti != null and $trait_dead and ($self_type_not_locally_eligible or $self_type_dead)) as $cascade
     | . + {
         excluded_reason: (
           if $f.generated then "generated"
@@ -63,7 +59,11 @@ def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
           elif ($attr_map[($f.id|tostring)] != null)
             then "attribute: " + $attr_map[($f.id|tostring)]
           elif $cascade
-            then "trait-impl-cascade (trait `\($im.trait)` and type `\($im.type)` both reported dead by the oracle)"
+            then "trait-impl-cascade (trait declared at \(key($ti.trait_decl)) reported dead by the oracle"
+                 + (if $self_type_not_locally_eligible
+                    then "; self type is a builtin/foreign item, not independently diagnosable"
+                    else "; self type declared at \(key($ti.self_type_decl)) also reported dead" end)
+                 + ")"
           else null
           end
         ),
