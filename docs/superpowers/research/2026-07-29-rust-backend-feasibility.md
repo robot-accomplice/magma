@@ -67,11 +67,30 @@ Every capability magma needs exists as a supported API:
 | macro expansion | `ProcMacroServerChoice::Sysroot` + `load_out_dirs_from_check` |
 | call graph | `ra_ap_ide`: `call_hierarchy`, `outgoing_calls`, `incoming_calls` |
 | trait / `dyn` dispatch | trait-aware — its own test resolves a call to `S1::callee()` back to trait decl `T1::callee` |
-| prod vs test split | `CallHierarchyConfig { exclude_tests: bool }` |
+| prod vs test split | ~~`CallHierarchyConfig { exclude_tests }`~~ — **FALSIFIED, see §2a.** Use `Function::is_test`/`is_main`/`is_bench` + two reachability walks (Go's model) |
 
-That last row is notable: magma's Go backend needed two separate package loads (and got the
-distinction wrong twice) to separate production from test reachability. rust-analyzer exposes it
-as a boolean.
+### 2a. `exclude_tests` FALSIFIED — the prod/test split is not a boolean
+
+Initially recorded as a notable win: magma's Go backend needed two package loads (and got the
+distinction wrong twice), while rust-analyzer appeared to expose it as a flag. **That was wrong.**
+Verified in two steps on 2026-07-29:
+
+1. With `cfg(test)` off (rust-analyzer's default) there are no test functions in the graph at all,
+   so the flag is inert — `exclude_tests` true/false gave identical output.
+2. With `cfg(test)` **enabled** via `CargoConfig.cfg_overrides`
+   (`CfgDiff::new(vec![CfgAtom::Flag(sym::test)], vec![])`), the fixture's test function and its
+   `t → only_test` edge appear (11 functions / 7 edges, up from 10 / 6) — and the two modes are
+   **still byte-identical**.
+
+`call_hierarchy.rs` shows why: every `exclude_tests` check is on the **callee** side
+(`def.is_test(db)` at lines 83/131/144), filtering test functions out of *results*. It never
+suppresses traversal *from* a test function that was explicitly queried, and extraction enumerates
+every function.
+
+**Resolution — mirror Go.** rust-analyzer provides the right primitives: `Function::is_test`,
+`is_main`, `is_bench`. Enable `cfg(test)`, emit one graph with those flags, and compute
+reachability twice (all roots vs production roots). Simpler than the flag, and it supplies
+requirement 3's mechanism as a side effect.
 
 Measured build cost (macOS aarch64, stable 1.97.1): **224 packages, 6m50s cold, 2.1 GB target,
 0.4s incremental.** Shipped binary: **22 MB release** / 121 MB debug (see §7).
