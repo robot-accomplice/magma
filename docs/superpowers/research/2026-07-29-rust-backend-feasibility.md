@@ -286,3 +286,52 @@ requirements rather than leaving them as tribal knowledge. At minimum, the Rust 
    install under `--non-interactive`.
 5. Validate set-identically against the lint oracle on real workspaces before claiming parity —
    the Go bar.
+
+## 9. Plan A oracle results (Task 8, 2026-07-29)
+
+`rust-helper/scripts/oracle-diff.sh` (+ `oracle-diff.jq`) is the measuring instrument: BFS
+reachability from `root` functions over `calls`, diffed by exact `file:line` key against
+`cargo check --message-format=json`'s `dead_code` diagnostics. Direction matters — helper-dead/
+oracle-live is FATAL (false dead code), helper-live/oracle-dead is conservative (report-only).
+
+**Fixtures — FATAL = 0 on all three:**
+
+| fixture | total | excluded | FATAL | report-only | agree dead | agree live |
+|---|---|---|---|---|---|---|
+| `testdata/fixture` | 11 | 1 | 0 | 0 | 2 | 8 |
+| `testdata/libonly` | 13 | 2 | 0 | 0 | 5 | 6 |
+| `testdata/multi_impl` | 5 | 0 | 0 | 0 | 0 | 5 |
+
+Normalisation excluded 3 functions total across the fixtures: 2 for `test:true` (a `#[test]`
+item is never compiled under plain `cargo check`, so the oracle is structurally silent on it —
+not the same thing as attribute suppression, but the same class of "the oracle declines to
+answer"), and 1 for a newly-identified **trait-impl cascade suppression**: rustc's `dead_code`
+lint does not emit a per-method diagnostic for a trait-impl method when its trait *and* self type
+are *both* independently already reported dead (verified with 3 isolated `cargo check` probes;
+inherent-impl methods get no such treatment). Both exclusion categories were absent from the
+brief's illustrative script and were added after the sketch produced non-empty FATAL sections on
+two of the three required fixtures — chased to root cause against recorded diagnostics before
+trusting the harness, not assumed away.
+
+Attribute-based normalisation (`#[allow(dead_code)]`, `#[no_mangle]`, `#[used]`,
+`#[export_name]`) is implemented and separately verified against a throwaway crate (none of the
+three required fixtures exercise it): 1 function correctly excluded, 1 sibling genuinely-dead
+function correctly still counted `agree_dead`.
+
+**Real workspace (`~/code/roboticus-rust`, 575k lines): NOT MEASURED.** The helper phase
+succeeded — `load_workspace` 1.7s, enumerate 11.0s (8,437 functions), edges 19.4s (12,352 edges,
+`Semantics`+macro-descent) — but the oracle phase (`cargo check --workspace`) had to compile the
+entire dependency graph from a cold `target/`, was still running after several minutes, and was
+not waited out. This is a one-time cost per workspace, not recurring: a warm `target/` (any prior
+`cargo check`/`cargo build` in that tree) lets a re-run reuse cached dependency artifacts.
+
+**Known blind spot, stated rather than hidden:** Tasks 9 and 11 don't just misclassify — the
+affected functions are absent from the helper's function list entirely (confirmed directly for
+Task 9: a default-bodied trait method never appears; confirmed via Task 7's own report for
+Task 11: `include!`-spliced `OUT_DIR` functions never reach `enumerate.rs::push`). A per-function
+diff cannot flag a function that was never emitted; a resulting false-dead-code case would show
+up as the *caller* looking unreachable, not as a direct FATAL entry for the missing function.
+Task 10 has no such blind spot — non-`Adt` self-type impls are enumerated, just mismarked, so a
+resulting false-dead-code case surfaces as an ordinary FATAL entry. Full harness design, fixture
+transcripts, and the cascade-suppression root-cause chain are in
+`.superpowers/sdd/2026-07-29-rust-helper/task-8-report.md`.
