@@ -16,14 +16,19 @@
 #   - generated:true (helper-flagged build-script/macro output)
 #   - test:true (a #[test] item: with cfg(test) off, `cargo check` never
 #     compiles it at all, so the lint is silent on it either way)
-#   - a function whose module path contains a `test`/`tests` segment
-#     (heuristic for code nested inside a #[cfg(test)] module — the helper
-#     enumerates it because it forces cfg(test) on; the oracle's plain
-#     `cargo check` does not compile that module at all. This is imprecise:
-#     it can both over-exclude a genuinely-named `tests` module that isn't
-#     cfg-gated, and under-exclude cfg(test) gating via a differently-named
-#     module. Real divergences hiding behind this heuristic are why FATAL
-#     entries must still be inspected, not assumed innocent.)
+#
+#   NOTE: an earlier revision also excluded any function whose module path
+#   contained a `test`/`tests` segment, as a heuristic for code nested inside
+#   a #[cfg(test)] module. Removed: it fired on none of the three required
+#   fixtures (zero empirical coverage) and a targeted repro
+#   (`mod tests { pub fn genuinely_live_helper() }` called from `main`, with
+#   NO #[cfg(test)] gate) showed it silently excluding a genuinely-live
+#   production function purely on module-name coincidence — an invisible
+#   false negative, the dangerous direction. A visible FATAL for a real
+#   #[cfg(test)]-gated-but-not-#[test]-attributed helper is preferred over
+#   silently hiding a wrong exclusion; that case is not currently normalised
+#   and will show as report-only or FATAL depending on reachability.
+#
 #   - source carries #[allow(...dead_code...)], #[no_mangle], #[used], or
 #     #[export_name...] immediately above the function (attributes that make
 #     genuinely-dead code invisible to the lint by design)
@@ -194,6 +199,17 @@ jq -nr \
   --slurpfile dead_traits "$WORK/dead-traits.json" \
   --slurpfile dead_types "$WORK/dead-types.json" \
   -f "$SCRIPT_DIR/oracle-diff.jq" | tee "$WORK/report.txt"
+
+echo "" >&2
+echo "NOTE: this diff only covers functions the helper enumerated. A function" >&2
+echo "the helper never emits as a node is invisible here — neither FATAL nor" >&2
+echo "report-only, just absent — so FATAL:0 does not by itself mean full parity." >&2
+echo "Known enumeration gaps: Task 9 (trait-declaration default-bodied methods)" >&2
+echo "and Task 11 (include!-generated code, e.g. OUT_DIR build-script output)." >&2
+echo "A propagated false-dead-code effect (a live enumerated function whose only" >&2
+echo "caller is one of these invisible functions) IS still caught as a normal" >&2
+echo "FATAL entry for that caller; what's uncovered is the invisible function's" >&2
+echo "own status and untested chained-invisibility cases." >&2
 
 fatal_count="$(grep -o '"fatal":[0-9]*' "$WORK/report.txt" | grep -o '[0-9]*$')"
 if [[ "${fatal_count:-0}" -gt 0 ]]; then
