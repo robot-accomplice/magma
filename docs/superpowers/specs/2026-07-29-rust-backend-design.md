@@ -422,3 +422,35 @@ Until (2) passes set-identically, Rust does not ship. That is what decision 1 me
 Steps 2 and 3 were the design's two real risks. **Both were retired during the spike** — the
 prod/test split is settled and the Semantics walker is built, verified against the oracle, and
 performance-measured. What remains is porting proven approaches, not discovering them.
+
+## Runtime expectations — per language AND per project
+
+**Correcting an earlier claim in this spec.** It previously asserted that "48s for a 575k-line
+workspace is acceptable for a pre-audit step." That figure was measured before the sysroot defect
+was found (see the research doc §9) and no longer holds: the same workspace now takes **312.5s**.
+More importantly, quoting any single number was the wrong shape of promise.
+
+magma's stated value is that it is **near-free to run before every task**. That remains true, but
+it needs stating precisely, because it holds for different reasons at different times:
+
+- **Re-runs are free, in every language.** Freshness-skip means an unchanged clean tree at the same
+  SHA does no analysis at all. This is the case that actually recurs in a working session.
+- **First-run cost varies by language, and substantially.** Go analyses a ~575k-line repo in ~15s.
+  Rust analyses a comparable repo in ~5 minutes — roughly 20× slower per function — because
+  rust-analyzer performs full type inference and macro expansion where Go's RTA does not, and
+  because Rust requires loading a sysroot and executing build scripts that Go has no analogue for.
+- **First-run cost also varies by project, within a language.** It scales with function and edge
+  count, not line count, so a macro-heavy or generic-heavy crate costs more than its size suggests.
+  A fixed sysroot overhead (~80s at time of writing, tracked as Task 14 in the helper plan)
+  dominates on *small* Rust projects, making them proportionally the worst case rather than the
+  best.
+
+**What magma should promise, and what it should not.** It should not promise a wall-clock number.
+It should promise that (a) re-running is free, (b) the first run's cost is bounded and reported,
+and (c) the cost is never paid twice for the same tree. Documentation and `--help` should say that
+Rust analysis is materially slower than Go's and why — a user who expects Go-like timings and
+meets a five-minute Rust run will reasonably assume something has hung.
+
+This is a **product-surface** requirement, not just a doc note: the CLI already prints a progress
+panel, and for Rust it should make the expensive phases legible (sysroot load, workspace load,
+enumeration, edges) so a long run reads as working rather than stuck.
