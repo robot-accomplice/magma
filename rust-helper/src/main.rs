@@ -65,6 +65,14 @@ fn main() -> anyhow::Result<()> {
         funcs.len()
     );
 
+    if !funcs.iter().any(|(n, _)| n.root) {
+        let r = model::Refusal::new(
+            "no roots in scope (no binary target and no public API); reachability not computable",
+        );
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        std::process::exit(2);
+    }
+
     let index: HashMap<ra_ap_hir::Function, u32> =
         funcs.iter().map(|(mf, f)| (*f, mf.id)).collect();
 
