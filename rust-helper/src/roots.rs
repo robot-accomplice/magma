@@ -24,6 +24,10 @@
 //!     answers this by testing the self type (and trait) against the same
 //!     reachable set `public_reachable` already computes for free items —
 //!     types show up in `Module::scope` exactly like functions and modules do.
+//!   - A *trait-impl* method's own `Visibility` is worthless as a signal: Rust
+//!     forbids `pub` on it syntactically, so it is never `Visibility::Public`
+//!     no matter how public the API is. Its reachability comes from the trait
+//!     plus the self type — see `is_public_method`.
 //!
 //! `public_reachable` walks `Module::scope`, which surfaces `use`-imported
 //! names alongside declared ones — so a `pub use` re-export of a privately-
@@ -123,15 +127,31 @@ fn all_ancestors_public(db: &RootDatabase, f: ra_ap_hir::Function) -> bool {
 }
 
 /// A method's public-API status is a property of its `impl`, not its own
-/// declaring module: `f` is a root if it is itself `pub` AND the `impl`'s
-/// self type is in the reachable set — and, for a trait impl, the trait is
-/// too. Requires the self type to resolve to an `Adt` (struct/enum/union);
-/// impls on other type shapes (builtins, tuples, references, ...) fall
-/// through to `all_ancestors_public` instead.
+/// declaring module. Both arms first require the `impl`'s self type to be in
+/// the reachable set, then diverge on where the *method's* own reachability
+/// comes from:
+///
+///   - **Trait impl** (`Impl::trait_` is `Some`): from the trait. A method in
+///     `impl Tr for S` can NEVER syntactically carry `pub` — Rust rejects the
+///     keyword there — so its `Visibility` is whatever the impl item's own AST
+///     yields, which is never `Public`. (`ra_ap_hir_def`'s `assoc_visibility`
+///     substitutes the trait's visibility only for the *declaration* inside
+///     `trait Tr { .. }`, whose container is `ItemContainerId::TraitId`; the
+///     impl block's copy has container `ItemContainerId::ImplId` and falls
+///     through to `visibility_from_ast`.) Gating on the method's own `pub`
+///     would therefore mark every trait-impl method in every crate dead —
+///     `Display`, `Iterator`, every custom trait — so the gate here is the
+///     trait's reachability instead: if a caller can name both `Tr` and `S`,
+///     it can call `S::m`, and rustc's dead_code lint agrees (it is silent for
+///     `pub trait Tr { fn m(&self); } pub struct S; impl Tr for S { fn m(&self){} }`).
+///   - **Inherent impl** (`trait_` is `None`): from the method's own `pub`,
+///     which it CAN carry and which rustc does enforce — a non-`pub` method on
+///     a public type is flagged unused.
+///
+/// Requires the self type to resolve to an `Adt` (struct/enum/union); impls on
+/// other type shapes (builtins, tuples, references, ...) fall through to
+/// `all_ancestors_public` instead.
 fn is_public_method(db: &RootDatabase, f: ra_ap_hir::Function, public: &HashSet<ModuleDef>) -> bool {
-    if f.visibility(db) != Visibility::Public {
-        return false;
-    }
     let Some(assoc) = f.as_assoc_item(db) else { return false };
     let AssocItemContainer::Impl(imp) = assoc.container(db) else { return false };
     let Some(adt) = imp.self_ty(db).as_adt() else { return false };
@@ -139,7 +159,7 @@ fn is_public_method(db: &RootDatabase, f: ra_ap_hir::Function, public: &HashSet<
         return false;
     }
     match imp.trait_(db) {
-        None => true,
         Some(tr) => public.contains(&ModuleDef::Trait(tr)),
+        None => f.visibility(db) == Visibility::Public,
     }
 }
