@@ -1219,3 +1219,17 @@ Verification: the dead-`Amb`/live-`Amb` probe must NOT exclude `live_side::Amb`'
 existing cascade behaviour on `libonly` must be unchanged; all fixtures keep their current
 FATAL counts (`libonly`'s one honest FATAL may legitimately become excluded once the gate is
 sound — if so, say which and why).
+
+> **Scoping correction for Task 13, found during Task 10's review — read before starting.**
+> The `(file, line)` keying above fixes **collision soundness** only. It does **not** close the
+> gap Task 10 surfaced: a builtin self type such as `i32` never receives its own `dead_code`
+> diagnostic, however precisely the enclosing trait is keyed, so the "trait AND self type both
+> independently dead" test can never be satisfied for it. Closing that requires an **additional**
+> criterion:
+>
+> *trait independently reported dead AND (self type independently reported dead **OR** the self
+> type is not a locally-defined item eligible for its own diagnostic).*
+>
+> Without this, Task 13 will ship believing it closed a gap it only half-closed, and `libonly`'s
+> two `priv_m` FATALs will remain. Two independent tasks (9 and 10) have now hit this mechanism
+> from different angles, which is the argument for prioritising it.
