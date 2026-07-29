@@ -60,8 +60,6 @@ def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
         excluded_reason: (
           if $f.generated then "generated"
           elif $f.test then "test (never compiled under plain `cargo check`)"
-          elif ($f.pkg | split("::") | any(. == "test" or . == "tests"))
-            then "test-module-nested (heuristic: pkg path contains a test/tests segment)"
           elif ($attr_map[($f.id|tostring)] != null)
             then "attribute: " + $attr_map[($f.id|tostring)]
           elif $cascade

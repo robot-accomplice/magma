@@ -318,20 +318,37 @@ Attribute-based normalisation (`#[allow(dead_code)]`, `#[no_mangle]`, `#[used]`,
 three required fixtures exercise it): 1 function correctly excluded, 1 sibling genuinely-dead
 function correctly still counted `agree_dead`.
 
-**Real workspace (`~/code/roboticus-rust`, 575k lines): NOT MEASURED.** The helper phase
-succeeded — `load_workspace` 1.7s, enumerate 11.0s (8,437 functions), edges 19.4s (12,352 edges,
-`Semantics`+macro-descent) — but the oracle phase (`cargo check --workspace`) had to compile the
-entire dependency graph from a cold `target/`, was still running after several minutes, and was
-not waited out. This is a one-time cost per workspace, not recurring: a warm `target/` (any prior
-`cargo check`/`cargo build` in that tree) lets a re-run reuse cached dependency artifacts.
+**Real workspace (`~/code/roboticus-rust`, 575k lines): NOT MEASURED here, run pending
+separately.** The helper phase succeeded — `load_workspace` 1.7s, enumerate 11.0s (8,437
+functions), edges 19.4s (12,352 edges, `Semantics`+macro-descent). The oracle phase (`cargo check
+--workspace`) did not finish on the first attempt; a corrected framing from a review round:
+`target/` was **not actually cold** (3,293 cached `.rmeta` files from prior runs), and a retry
+made steady visible progress (~1 crate/second) rather than a from-scratch build. The retry itself
+was handed to the coordinator as a separate, independently-run background task
+(`/tmp/robo-oracle.json`) rather than completed in this document — real-workspace numbers will be
+folded in separately when that lands. Either way, this remains a one-time cost per workspace, not
+recurring, once `target/` is warm.
 
-**Known blind spot, stated rather than hidden:** Tasks 9 and 11 don't just misclassify — the
-affected functions are absent from the helper's function list entirely (confirmed directly for
-Task 9: a default-bodied trait method never appears; confirmed via Task 7's own report for
-Task 11: `include!`-spliced `OUT_DIR` functions never reach `enumerate.rs::push`). A per-function
-diff cannot flag a function that was never emitted; a resulting false-dead-code case would show
-up as the *caller* looking unreachable, not as a direct FATAL entry for the missing function.
-Task 10 has no such blind spot — non-`Adt` self-type impls are enumerated, just mismarked, so a
-resulting false-dead-code case surfaces as an ordinary FATAL entry. Full harness design, fixture
-transcripts, and the cascade-suppression root-cause chain are in
+**Normalisation, final state:** two disclosed categories (`test:true`, `trait-impl-cascade`,
+above) plus attribute suppression. A third, undisclosed heuristic ("test-module-nested" — exclude
+any function whose module path contained a `test`/`tests` segment) was tried during
+implementation, fired on zero of the three fixtures, and was found by review to silently
+over-exclude a genuinely-live function with no `#[cfg(test)]` gate at all (module-name coincidence
+only). It was removed rather than kept-and-narrowed: a visible FATAL for an edge case is safer
+than an invisible false negative in exactly the mechanism the brief warns divergence hides behind.
+
+**Known blind spot, corrected framing:** Tasks 9 and 11 make the affected functions absent from
+the helper's function list entirely (confirmed directly for Task 9: a default-bodied trait method
+never appears; confirmed via Task 7's own report for Task 11: `include!`-spliced `OUT_DIR`
+functions never reach `enumerate.rs::push`). An earlier draft of this note overstated the
+consequence — repro evidence shows **propagated false dead code IS caught**: a live enumerated
+function whose only caller is one of these invisible functions still shows FATAL, because the
+downstream function is itself a normal node with no incoming edge, so BFS marks it unreached and
+the oracle disagrees. What is genuinely uncovered is narrower: the invisible function's *own*
+liveness status (no opinion, either direction), and untested chained-invisibility cases. Task 10
+has no such blind spot — non-`Adt` self-type impls are enumerated, just mismarked, so a resulting
+false-dead-code case surfaces as an ordinary FATAL entry. The harness also now prints a fixed
+stderr note on every run naming this limitation and Tasks 9/11 directly, so a bare `FATAL: 0`
+cannot be read as "full parity" without it. Full harness design, fixture transcripts, and the
+cascade-suppression and blind-spot root-cause chains are in
 `.superpowers/sdd/2026-07-29-rust-helper/task-8-report.md`.
