@@ -31,6 +31,19 @@ pub struct Function {
     /// Repo-relative path.
     pub file: String,
     pub line: u32,
+    /// 1-based UTF-8 byte column of the function's own name token, matching
+    /// rustc's `column_start` convention in its JSON diagnostics (verified
+    /// directly: a `trait \`DeadTr\` is never used` diagnostic for `pub trait
+    /// DeadTr` at 4-space indent reports `column_start: 15` — 4 spaces + the
+    /// 10-char `"pub trait "` prefix + 1 for 1-based = 15). Exists so the
+    /// oracle-diff harness can key a dead_code diagnostic's primary span
+    /// against a specific declaration by (file, line, column), not just
+    /// (file, line) — two distinct declarations legitimately sharing one
+    /// source line (e.g. `trait Tr { fn a(&self); fn b(&self); }` written on
+    /// a single line) are otherwise indistinguishable by line alone, and
+    /// rustc's own diagnostic column for such a case correctly points at the
+    /// specific method name, not just the shared line.
+    pub column: u32,
     /// "func" for free functions AND associated fns without a receiver;
     /// "method" for anything with a `self` receiver.
     pub kind: String,
@@ -54,33 +67,60 @@ pub struct Function {
     /// (`impl Trait for Type { .. }`) — never for free functions, inherent-
     /// impl items, or a trait declaration's own method. Lets the oracle-diff
     /// harness key its dead-code cascade-suppression check on declaration
-    /// (file, line) instead of a bare, collision-prone name (see
+    /// (file, line, column) instead of a bare, collision-prone name (see
     /// `scripts/oracle-diff.sh`/`.jq`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trait_impl: Option<TraitImpl>,
 }
 
-/// (file, line) locations the oracle-diff harness needs to test rustc's
-/// trait-impl cascade-suppression: rustc silences a per-method dead_code
-/// diagnostic when the enclosing trait/self-type cluster is itself dead.
+/// (file, line, column) locations the oracle-diff harness needs to test
+/// rustc's trait-impl cascade-suppression: rustc silences a per-method
+/// dead_code diagnostic when the enclosing trait/self-type cluster is itself
+/// dead.
 #[derive(Serialize)]
 pub struct TraitImpl {
     /// Declaration site of the implemented trait.
     pub trait_decl: Loc,
-    /// Declaration site of the self type, when it is a workspace-local
-    /// struct/enum/union eligible for its own dead_code diagnostic. `None`
-    /// for a builtin (e.g. `i32`) or externally-defined self type — those
-    /// can never receive a dead_code diagnostic from this workspace's own
-    /// `cargo check`, so their liveness can't gate the cascade the way a
-    /// local type's can.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub self_type_decl: Option<Loc>,
+    pub self_type: SelfType,
+}
+
+/// Three states, deliberately not collapsed to `Option<Loc>`: `NotEligible`
+/// and `Unresolved` both mean "no location", but they must NOT be treated
+/// the same by a consumer testing "self type is dead OR not independently
+/// diagnosable" — `NotEligible` is allowed to satisfy that OR, `Unresolved`
+/// must not (an exclusion must never rest on a failed lookup; a disclosed
+/// FATAL is safer). Collapsing them to one `None` would let a resolution
+/// *failure* silently license an exclusion the same way a genuine builtin
+/// self type does.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SelfType {
+    /// A workspace-local struct/enum/union whose own declaration was found.
+    Local {
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    /// A builtin, tuple, reference, or externally-defined (non-workspace-
+    /// local) type — including a generic instantiation of an external type
+    /// (e.g. `impl Tr for Vec<S>`, where `as_adt()` resolves to `Vec` itself,
+    /// not the argument `S`, so it's `Vec`'s own external origin that lands
+    /// here even when `S` is workspace-local). See `enumerate.rs::trait_impl_loc`
+    /// for the two distinct paths that both produce this variant.
+    NotEligible,
+    /// The self type resolved to a workspace-local `Adt`, but its own
+    /// declaration's (file, line, column) could not be determined (source or
+    /// name lookup failed). Never observed in practice as of Task 13's fix, but
+    /// modelled explicitly so the harness can fail safe rather than treat an
+    /// unresolved lookup as license to exclude.
+    Unresolved,
 }
 
 #[derive(Serialize)]
 pub struct Loc {
     pub file: String,
     pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Serialize)]
