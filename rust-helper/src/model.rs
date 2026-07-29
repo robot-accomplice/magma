@@ -73,4 +73,10 @@ pub struct Result_ {
 pub struct Call {
     pub from: u32,
     pub to: u32,
+    /// Repo-relative path of the call site.
+    pub site_file: String,
+    pub site_line: u32,
+    /// "static" when the target is resolved unambiguously; "dynamic" when the
+    /// call goes through `dyn Trait` and the concrete impl is chosen at runtime.
+    pub kind: String,
 }
