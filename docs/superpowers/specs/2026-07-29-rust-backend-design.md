@@ -114,6 +114,30 @@ Walker shape: descend every body node; on `ast::MacroCall`, expand via
 recursion); resolve `ast::CallExpr` paths via `resolve_path` → `PathResolution::Def(Function)`,
 and `ast::MethodCallExpr` via `resolve_method_call`.
 
+**Performance: measured, and the correct approach is essentially free.** On roboticus-rust
+(575k lines):
+
+| phase | `outgoing_calls` | **`Semantics` walker** |
+|---|---|---|
+| load | 2.2s | 1.8s |
+| enumerate | 11.8s / 3,289 fns | 15.2s / **8,437** fns (`cfg(test)` enabled) |
+| edges | 29.4s / 4,515 | **31.4s / 49,316** |
+| **total** | 43.4s | **48.4s** |
+
+Roughly **11× more edges for ~7% more wall time**. Correctness and performance point the same
+way, so there is no trade-off to adjudicate. 48s for a 575k-line workspace is acceptable for a
+pre-audit step, and freshness-skip keeps re-runs free.
+
+Two caveats carried into implementation:
+
+- **The walker does not deduplicate.** 49,316 is a raw count of resolved targets; Go's
+  `collectEdges` aggregates per `(from, to)` pair (upgrading `dynamic`→`static` when any call site
+  is static). magma must dedup identically, so the real edge count will be lower.
+- Function count rose 3,289 → 8,437 purely from enabling `cfg(test)`. That is expected — Go's
+  roboticus has 8,954 of 17,561 functions in test files — but it means test code roughly doubles
+  the graph, and requirement 3 (excluding test-declared functions from the test-only view) is
+  therefore load-bearing, not a detail.
+
 ## The five correctness facts, as Rust requirements
 
 The Go backend's hard-won facts are recorded as prose in HANDOFF.md, so fresh extraction code does
