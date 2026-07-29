@@ -327,6 +327,33 @@ per bar #2.
 
 **Rust must be indistinguishable from Go to every consumer** — that is requirement 2 of the bar.
 
+### OPEN CONTRACT QUESTION: should the artifact record that code was executed?
+
+Raised by the Architext side (2026-07-29), and worth deciding before Rust ships.
+
+**Settled part:** declining execution is **always a hard refusal**, never a degraded map. So
+"Rust map, execution declined, build-script code invisible" is not an emittable state — a
+consumer can never receive a map that silently lacks those edges. That is the rule in §Gates and
+it is not in question.
+
+**Open part:** the artifact does not *record* that execution happened. A consumer can only
+**derive** it — "language is `rust` and `computable` is true, therefore code was executed" — which
+is a convention they must know, not a fact they can read.
+
+Arguments both ways, honestly:
+
+- **Against a field:** it is derivable today, and magma does not add what it does not need (YAGNI).
+- **For a field:** "derivable if you know the rule" is a poor property for a **trust boundary**.
+  Go analysis *reads*; Rust analysis *executes*. That is a categorical difference in what running
+  magma does to your machine, and consumers model it as a first-class architecture fact rather
+  than a rendering detail. It also stops being derivable the moment sandboxed execution lands
+  (deferred, not cancelled), at which point `rust + computable` would no longer imply "executed
+  unsandboxed".
+
+**Leaning:** add it — a single honest boolean (e.g. `executed_target_code`) rather than a
+provenance object. Requires the same Architext handshake as `fidelity: "semantic"`, and both can
+travel together. **Operator decision pending.**
+
 ## Security
 
 magma's Go analysis never executes target code. **Rust analysis does** — `build.rs` scripts and
