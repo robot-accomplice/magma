@@ -10,3 +10,4 @@ cover.out
 # rust helper build output
 /rust-helper/target/
 /rust-helper/testdata/fixture/target/
+/rust-helper/testdata/libonly/target/

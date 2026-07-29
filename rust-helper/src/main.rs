@@ -2,6 +2,7 @@
 // Compares against outgoing_calls. usage: helper <root> [--outgoing]
 mod enumerate;
 mod model;
+mod roots;
 mod walk;
 
 use std::collections::HashMap;
@@ -53,8 +54,11 @@ fn main() -> anyhow::Result<()> {
     // Function ids are the index of the function in the enumeration vector.
     // Signature/type display requires the salsa db to be attached to this
     // thread (same requirement as the Semantics-based edge extraction below).
-    let funcs: Vec<(model::Function, ra_ap_hir::Function)> =
-        ra_ap_hir::attach_db(db, || enumerate::collect(db, &vfs, root_abs.as_path()));
+    let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
+        let mut funcs = enumerate::collect(db, &vfs, root_abs.as_path());
+        roots::mark(db, &mut funcs);
+        funcs
+    });
     eprintln!(
         "TIMING enumerate: {:.1}s for {} functions",
         t1.elapsed().as_secs_f64(),
