@@ -1,5 +1,8 @@
 // Spike: Semantics-based edge extraction with macro descent.
 // Compares against outgoing_calls. usage: helper <root> [--outgoing]
+mod model;
+
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -71,8 +74,18 @@ fn main() -> anyhow::Result<()> {
         funcs.len()
     );
 
+    // Function ids are the index of the function in the enumeration vector.
+    let functions: Vec<model::Function> = funcs
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _pos, _f))| model::Function { id: i as u32, symbol: n.clone() })
+        .collect();
+    let index: HashMap<ra_ap_hir::Function, u32> =
+        funcs.iter().enumerate().map(|(i, (_n, _p, f))| (*f, i as u32)).collect();
+
     let t2 = Instant::now();
     let mut edges = 0usize;
+    let mut calls: Vec<model::Call> = Vec::new();
     if use_outgoing {
         let cfg = CallHierarchyConfig { exclude_tests: false, ra_fixture: RaFixtureConfig::default() };
         for (n, pos, _f) in &funcs {
@@ -92,7 +105,7 @@ fn main() -> anyhow::Result<()> {
         edges = ra_ap_hir::attach_db(db, || {
             let sema = Semantics::new(db);
             let mut n_edges = 0usize;
-            for (n, _pos, f) in &funcs {
+            for (i, (_n, _pos, f)) in funcs.iter().enumerate() {
                 let Some(src) = f.source(db) else { continue };
                 if let Some(efid) = src.file_id.file_id() {
                     let _ = sema.parse(efid);
@@ -101,7 +114,11 @@ fn main() -> anyhow::Result<()> {
                 let mut targets = Vec::new();
                 walk(&sema, body.syntax(), &mut targets, 0);
                 for t in &targets {
-                    println!("EDGE\t{}\t{}", n, t);
+                    // Calls into dependencies are out of scope (CrateOrigin::Local
+                    // filter means `index` only has local functions).
+                    if let Some(&to_id) = index.get(t) {
+                        calls.push(model::Call { from: i as u32, to: to_id });
+                    }
                 }
                 n_edges += targets.len();
             }
@@ -111,12 +128,22 @@ fn main() -> anyhow::Result<()> {
     }
     eprintln!("TIMING edges: {:.1}s for {} edges", t2.elapsed().as_secs_f64(), edges);
     eprintln!("TIMING TOTAL: {:.1}s", t0.elapsed().as_secs_f64());
+
+    if !use_outgoing {
+        let out = model::Output::new(functions, calls);
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    }
     Ok(())
 }
 
 /// Walk a body, resolving calls. Descends into macro expansions — the thing
 /// outgoing_calls fails to do, which caused false dead code for macro targets.
-fn walk(sema: &Semantics<'_, RootDatabase>, node: &SyntaxNode, out: &mut Vec<String>, depth: usize) {
+fn walk(
+    sema: &Semantics<'_, RootDatabase>,
+    node: &SyntaxNode,
+    out: &mut Vec<ra_ap_hir::Function>,
+    depth: usize,
+) {
     if depth > 8 {
         return; // guard against pathological macro recursion
     }
@@ -132,14 +159,14 @@ fn walk(sema: &Semantics<'_, RootDatabase>, node: &SyntaxNode, out: &mut Vec<Str
                     if let Some(PathResolution::Def(ModuleDef::Function(f))) =
                         sema.resolve_path(&path)
                     {
-                        out.push(f.name(sema.db).as_str().to_owned());
+                        out.push(f);
                     }
                 }
             }
         }
         if let Some(mcall) = ast::MethodCallExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_method_call(&mcall) {
-                out.push(f.name(sema.db).as_str().to_owned());
+                out.push(f);
             }
         }
     }
