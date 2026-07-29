@@ -8,7 +8,7 @@ Feeds: the Rust backend spec (not yet written)
 > boundary; the helper, fixture, and original findings file were lost. This document is
 > reconstructed from the session record. Every claim below was *observed* during the spike —
 > nothing here is inferred or remembered second-hand — but the artifacts no longer exist to
-> re-verify against, and the one item that was never measured is marked as such.
+> re-verify against. Throughput and binary size were re-measured on 2026-07-29 with a rebuilt helper (§7).
 >
 > **Lesson recorded:** spike deliverables belong in the repo, not the scratchpad.
 
@@ -74,8 +74,7 @@ distinction wrong twice) to separate production from test reachability. rust-ana
 as a boolean.
 
 Measured build cost (macOS aarch64, stable 1.97.1): **224 packages, 6m50s cold, 2.1 GB target,
-0.4s incremental.** Shipped-binary size **unknown** — the spike's stub did not reference the APIs,
-so the linker discarded them and its 459 KB is meaningless.
+0.4s incremental.** Shipped binary: **22 MB release** / 121 MB debug (see §7).
 
 ### Candidate B — LLVM IR via stable `cargo rustc --emit=llvm-ir` — REJECTED
 
