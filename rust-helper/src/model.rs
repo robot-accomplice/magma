@@ -34,8 +34,10 @@ pub struct Function {
     /// "func" for free functions AND associated fns without a receiver;
     /// "method" for anything with a `self` receiver.
     pub kind: String,
-    /// `pub` visibility. Load-bearing: for a library this also determines root
-    /// status, because rustc treats a lib's public API as the root set.
+    /// `pub` visibility, syntactic: the item's own `pub` keyword, independent
+    /// of whether an enclosing module is private. Root status (see `root`) is
+    /// computed separately in `roots.rs` from *effective* visibility, because
+    /// a `pub fn` in a private module is not part of the crate's public API.
     pub exported: bool,
     /// Declared in test code (`Function::is_test`).
     pub test: bool,
