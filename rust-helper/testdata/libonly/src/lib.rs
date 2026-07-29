@@ -63,3 +63,46 @@ pub struct U;
 impl U {
     fn helper(&self) {}
 }
+
+/// Trait-impl case 1: everything public, at the top level, no re-export
+/// anywhere. Rust FORBIDS `pub` on a trait-impl method, so `TopTr::top_m`'s
+/// own `Visibility` is not `Public` — gating on it would report this
+/// maximally-public method dead. rustc's dead_code lint is completely silent
+/// here, so `top_m` must be root:true.
+pub trait TopTr {
+    fn top_m(&self);
+}
+pub struct TopS;
+impl TopTr for TopS {
+    fn top_m(&self) {}
+}
+
+/// Trait-impl case 2: trait, type and impl all inside a private module, with
+/// BOTH the trait and the type re-exported at the crate root. External callers
+/// can name `ReTr` and `ReS`, so they can call `ReS::re_m` — rustc is silent,
+/// so `re_m` must be root:true.
+mod reexported_trait {
+    pub trait ReTr {
+        fn re_m(&self);
+    }
+    pub struct ReS;
+    impl ReTr for ReS {
+        fn re_m(&self) {}
+    }
+}
+pub use reexported_trait::{ReS, ReTr};
+
+/// Trait-impl case 3: identical shape to `reexported_trait`, but with NO
+/// re-export — neither trait nor type is nameable outside the crate, so
+/// nothing external can reach `hid_m`. rustc flags the whole cluster
+/// (`trait HidTr` never used, `struct HidS` never constructed), so `hid_m`
+/// must be root:false.
+mod hidden_trait {
+    pub trait HidTr {
+        fn hid_m(&self);
+    }
+    pub struct HidS;
+    impl HidTr for HidS {
+        fn hid_m(&self) {}
+    }
+}
