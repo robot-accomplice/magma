@@ -487,3 +487,35 @@ field would still be correct where one applying the rule would not.
 The helper emits the same fact in `magma-rust-helper/1` so magma's Go side passes it through
 rather than re-deriving it. Additive to Architext's schema, which accepts unknown fields; notify
 them alongside `fidelity: "semantic"` before either ships.
+
+## Contract governance: a new VALUE is one-sided, a new FIELD is two-sided
+
+**Learned the hard way (2026-07-29).** This spec previously described both `fidelity: "semantic"`
+and `executed_target_code` as "additive, validates against Architext's schema unchanged." That was
+right for one and wrong for the other, and the consumer caught it by running their real validator
+against an artifact carrying both:
+
+```
+Architext validation failed:
+- codeGraph: Additional properties are not allowed ('executed_target_code' was unexpected)
+```
+
+`fidelity: "semantic"` passed cleanly **in the same document**, which isolates the cause exactly:
+
+| change | why it behaves that way |
+|---|---|
+| **New value** on an existing property (`fidelity: "semantic"`) | their schema declares `"fidelity": {"type":"string"}`, unconstrained — any string validates. **One-sided:** magma can ship it. |
+| **New property** (`executed_target_code`) | their root object sets `"additionalProperties": false`, so *any* undeclared property is rejected regardless of type or value. **Two-sided:** the consumer must declare it before magma emits it. |
+
+Had this shipped undeclared, **every artifact magma produced would have failed validation on day
+one** — the same shape of failure as the `tree`-carrying-the-SHA bug, and for the same underlying
+reason: a change that is obviously additive from the producer's side is not automatically additive
+across a strict consumer contract.
+
+**Standing rule for `magma-code-graph/1`:** before emitting any **new field**, notify the consumer
+with the field name and type so they can declare it first. New *values* on existing fields do not
+need this. Their `additionalProperties: false` is deliberate — it is what stops a typo'd field
+passing silently — so the strictness is a feature, and the coordination cost is the price of it.
+
+(Resolved: they declared `executed_target_code` as an optional boolean, with a conformance fixture
+and a regression test recording the reproduction. Both changes validate today.)
