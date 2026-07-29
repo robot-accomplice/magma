@@ -78,21 +78,20 @@ fn push(
     // position; for other macro-item shapes it falls back to the macro call
     // site — either way a human-navigable location, never a synthetic one.
     let is_macro_origin = src.file_id.is_macro();
-    let (file_id, line) = match src.file_id.file_id() {
+    let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
-            let line = ra_ap_ide_db::line_index(db, file_id)
-                .line_col(name_node.syntax().text_range().start())
-                .line;
-            (file_id, line)
+            let line_col = ra_ap_ide_db::line_index(db, file_id)
+                .line_col(name_node.syntax().text_range().start());
+            (file_id, line_col.line, line_col.col)
         }
         None => {
             sema.parse_or_expand(src.file_id);
             let range = sema.original_range(name_node.syntax());
             let file_id = range.file_id.file_id(db);
-            let line =
-                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start()).line;
-            (file_id, line)
+            let line_col =
+                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start());
+            (file_id, line_col.line, line_col.col)
         }
     };
 
@@ -122,6 +121,7 @@ fn push(
             pkg: module_path(db, f),
             file,
             line: line + 1, // line_index is 0-based; magma reports 1-based
+            column: column + 1, // same: line_index col is 0-based, rustc's is 1-based
             kind: if f.self_param(db).is_some() { "method" } else { "func" }.to_owned(),
             exported: f.visibility(db) == Visibility::Public,
             test: f.is_test(db),
@@ -139,9 +139,9 @@ fn push(
     ));
 }
 
-/// (file, line) locations the oracle-diff harness needs to key its trait-impl
-/// cascade-suppression check collision-proof (Task 13). `None` unless `f` is
-/// an assoc item of a *trait* impl (`impl Trait for Type { .. }`) — an
+/// (file, line, column) locations the oracle-diff harness needs to key its
+/// trait-impl cascade-suppression check collision-proof (Task 13). `None`
+/// unless `f` is an assoc item of a *trait* impl (`impl Trait for Type { .. }`) — an
 /// inherent-impl method, a free function, or a trait declaration's own
 /// method never participates in rustc's cascade-suppression behaviour this
 /// exists to key off of (see the module comment in `roots.rs` for the same
@@ -161,25 +161,52 @@ fn trait_impl_loc(
     let trait_decl = decl_loc(db, sema, vfs, root, trait_src)?;
 
     // The self type only gates the cascade when it can independently receive
-    // its own dead_code diagnostic: a workspace-local struct/enum/union. A
-    // builtin (e.g. `i32` — the orphan rule means this shape can ONLY occur
-    // in a trait impl) or a type from another crate never gets one, however
-    // dead it is, so it must not be required to be "dead" for the cascade to
-    // apply — that is the Task 13 scoping-correction criterion.
-    let self_type_decl = imp.self_ty(db).as_adt().and_then(|adt| {
-        if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
-            return None;
+    // its own dead_code diagnostic: a workspace-local struct/enum/union.
+    // `as_adt()` returns `None` outright for a reference/tuple/builtin shape
+    // (verified: `impl Tr for &S` gives `as_adt() == None` even though `S`
+    // itself is workspace-local — there is no "reference" ADT to find). For a
+    // generic instantiation of an external type it resolves to that type's
+    // OWN ADT rather than the argument's — verified: `impl Tr for Vec<S>`
+    // gives `as_adt() == Some(Vec)`, not `S` — which then correctly fails the
+    // `CrateOrigin::Local` check below since `Vec` is std's, not this
+    // workspace's. Either path lands on `NotEligible`, just via different
+    // reasoning; a type from another (already-local) crate hits the same
+    // `Local` check directly. None of these can receive a dead_code
+    // diagnostic from this workspace's own `cargo check`, however dead the
+    // impl is, so none of them may be required to independently show "dead"
+    // for the cascade to apply — that is the Task 13 scoping-correction
+    // criterion. `Unresolved` (as opposed to `NotEligible`) is reserved for a
+    // *found* local `Adt` whose own declaration location lookup itself
+    // failed — it must never license the cascade the way genuine
+    // ineligibility does (see `model::SelfType`).
+    let self_type = match imp.self_ty(db).as_adt() {
+        None => model::SelfType::NotEligible,
+        Some(adt) => {
+            if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+                model::SelfType::NotEligible
+            } else {
+                match adt.source(db).and_then(|src| decl_loc(db, sema, vfs, root, src)) {
+                    Some(loc) => {
+                        model::SelfType::Local { file: loc.file, line: loc.line, column: loc.column }
+                    }
+                    None => model::SelfType::Unresolved,
+                }
+            }
         }
-        decl_loc(db, sema, vfs, root, adt.source(db)?)
-    });
+    };
 
-    Some(model::TraitImpl { trait_decl, self_type_decl })
+    Some(model::TraitImpl { trait_decl, self_type })
 }
 
 /// Resolves an item's own declaration to a repo-relative (file, 1-based
-/// line), using its `name` node's position — same real-file/macro-expansion
-/// handling `push` uses for a function's own declaration, generalised over
-/// any named HIR item (`ra_ap_syntax::ast::HasName`).
+/// line, 1-based column), using its `name` node's position — same real-file/
+/// macro-expansion handling `push` uses for a function's own declaration,
+/// generalised over any named HIR item (`ra_ap_syntax::ast::HasName`). The
+/// column (not just the line) matters: two distinct declarations can share
+/// one source line (see `model::Function::column`), and rustc's own
+/// diagnostic column always points at the exact name token, never just the
+/// line — so a caller matching on (file, line, column) against rustc's own
+/// `column_start` gets an exact-token match, not merely a same-line one.
 fn decl_loc<N: AstNode + HasName>(
     db: &RootDatabase,
     sema: &Semantics<'_, RootDatabase>,
@@ -188,24 +215,27 @@ fn decl_loc<N: AstNode + HasName>(
     src: InFile<N>,
 ) -> Option<model::Loc> {
     let name_node = src.value.name()?;
-    let (file_id, line) = match src.file_id.file_id() {
+    let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
-            let line = ra_ap_ide_db::line_index(db, file_id)
-                .line_col(name_node.syntax().text_range().start())
-                .line;
-            (file_id, line)
+            let line_col = ra_ap_ide_db::line_index(db, file_id)
+                .line_col(name_node.syntax().text_range().start());
+            (file_id, line_col.line, line_col.col)
         }
         None => {
             sema.parse_or_expand(src.file_id);
             let range = sema.original_range(name_node.syntax());
             let file_id = range.file_id.file_id(db);
-            let line =
-                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start()).line;
-            (file_id, line)
+            let line_col =
+                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start());
+            (file_id, line_col.line, line_col.col)
         }
     };
-    Some(model::Loc { file: repo_relative_path(vfs, root, file_id), line: line + 1 })
+    Some(model::Loc {
+        file: repo_relative_path(vfs, root, file_id),
+        line: line + 1,
+        column: column + 1,
+    })
 }
 
 /// Repo-relative path for `file_id`, computed the same way for node metadata

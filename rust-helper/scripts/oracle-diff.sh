@@ -156,17 +156,31 @@ if [[ -n "$stale_packages" ]]; then
 fi
 echo "oracle: all $(wc -l <<<"$workspace_packages" | tr -d ' ') workspace-local crate(s) actually recompiled this run — proceeding" >&2
 
-# Oracle dead set, keyed by "file:line" of each dead_code diagnostic's primary
-# span (not by name — two functions can share a name, but never a file+line).
-# No filtering on the diagnostic's item kind (function/method/struct/trait/
-# field...): a non-function diagnostic's primary span line can only collide
-# with a helper function's declaration line by coincidence, which normal
-# source layout makes vanishingly unlikely, and this key is only ever probed
-# against the helper's own function set below.
+# Oracle dead set, keyed by "file:line:column" of each dead_code diagnostic's
+# primary span — column, not just line, because two distinct declarations can
+# legitimately share ONE source line (a trait's methods all declared inline:
+# `trait Tr { fn a(&self); fn b(&self); }`) and rustc still gives each its own
+# diagnostic with a distinct column pointing at that exact name token.
+#
+# This used to be file:line alone, which is unsound for the same reason two
+# earlier revisions of the trait-impl cascade check were unsound (see the
+# header comment above): keyed on the wrong granularity, a diagnostic whose
+# span merely LANDS on the same line as some other declaration can be
+# misread as being ABOUT that other declaration. Verified directly with a
+# one-line trait body (`trait Tr { fn live_m(&self); fn dead_m(&self); }`):
+# the `dead_m` diagnostic's primary span is `{line: 2, column: 41}` — line 2
+# is ALSO the trait's own declaration line (`Tr` itself starts at column 15
+# on that same line) and, in a hand-written multi-method-per-line trait, the
+# line of an unrelated LIVE method's declaration too. A file:line-only key
+# would treat that diagnostic as evidence about any of them; file:line:column
+# can only ever match the one declaration whose own name token starts there.
+# `enumerate.rs` emits each function's own (and each trait-impl's trait/self-
+# type's own) column for exactly this purpose — see `model::Function::column`
+# and `model::Loc`.
 jq -c 'select(.reason=="compiler-message")
        | select(.message.code.code=="dead_code")
        | .message.spans[]? | select(.is_primary)
-       | {file: .file_name, line: .line_start}' \
+       | {file: .file_name, line: .line_start, column: .column_start}' \
   "$WORK/cargo.jsonl" > "$WORK/oracle-dead.jsonl"
 jq -s '.' "$WORK/oracle-dead.jsonl" > "$WORK/oracle-dead.json"
 
@@ -177,10 +191,11 @@ jq -s '.' "$WORK/oracle-dead.jsonl" > "$WORK/oracle-dead.json"
 #
 # The trait-impl cascade-suppression check needs NO source scanning — Task 13
 # moved that to `enumerate.rs`, which emits each trait-impl method's own
-# `trait_impl.{trait_decl,self_type_decl}` (file, line) directly in
+# `trait_impl.{trait_decl,self_type}` (file, line, column) directly in
 # helper.json, computed from rustc's own HIR rather than scraped from source
-# text. oracle-diff.jq looks those up against the same oracle-dead-span map
-# built above — no separate scan, no name matching, no collision risk.
+# text. oracle-diff.jq looks those up against the same column-precise
+# oracle-dead-span map built above — no separate scan, no name matching, and
+# (per the column-precision above) no line-sharing collision either.
 echo "== scanning for liveness-affecting attributes ==" >&2
 jq -r '.functions[] | select(.generated | not) | select(.test | not)
        | [.id, .file, .line] | @tsv' "$WORK/helper.json" \
