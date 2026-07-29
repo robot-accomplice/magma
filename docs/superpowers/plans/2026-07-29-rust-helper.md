@@ -130,10 +130,20 @@ The walker returns `Vec<ra_ap_hir::Function>`; map each through `index`, skippin
 cd rust-helper && cargo build --release
 ./target/release/magma-rust-helper-spike testdata/fixture | jq '{v: .contract_version, fns: (.functions|length), calls: (.calls|length)}'
 ```
-Expected: `contract_version` `"magma-rust-helper/1"`, 11 functions, 8 calls.
+Expected: `contract_version` `"magma-rust-helper/1"`, 11 functions, **7** calls.
+
+> **Why 7 and not 8** (corrected after Task 1 ran; the original estimate came from the
+> pre-ID name-based spike output, which was counting an edge that does not survive
+> id-resolution). The fixture's `t.speak()` goes through a `dyn Speak` receiver, and
+> `sema.resolve_method_call` resolves it to the **trait's declared function**
+> (`Speak::speak`), not to `Dog::speak`. Trait declarations are not enumerated — only impl
+> methods and free functions are — so that target is absent from the id index and the edge
+> is dropped. **This is a real false-dead-code bug**, now confirmed rather than suspected,
+> and Task 6 fixes it. Do not "fix" it here by enumerating trait declarations: that would
+> create edges to a declaration that has no body, which is not what the graph means.
 
 ```bash
-./target/release/magma-rust-helper-spike testdata/fixture | jq -e '.calls | length == 8' && echo OK
+./target/release/magma-rust-helper-spike testdata/fixture | jq -e '.calls | length == 7' && echo OK
 ```
 Expected: `OK`.
 
@@ -725,9 +735,20 @@ also refuse most of the Rust ecosystem."
 
 ---
 
-### Task 6: `dyn` dispatch across multiple impls — the open correctness question
+### Task 6: `dyn` dispatch — fix the confirmed false-dead-code bug
 
-The existing fixture has ONE impl of its trait, so it cannot tell us what happens when several types implement a trait and the call goes through `dyn`. If resolution picks a single impl, the others' methods are unreachable in our graph → **false dead code**, the same class of bug as the macro defect.
+**No longer an open question — Task 1 answered it.** With stable ids in place, the behaviour is
+observable and confirmed: `sema.resolve_method_call` on a `dyn Trait` receiver resolves to the
+**trait's declared function**, not to any impl (verified via `AsAssocItem::container` →
+`AssocItemContainer::Trait(_)`). Trait declarations are not enumerated, so the target is absent
+from the id index and **the edge is dropped entirely**.
+
+Consequence, and why this is Critical rather than cosmetic: a `dyn`-dispatched method has **no
+incoming edge**, so every impl reachable only through `dyn` is reported unreachable — **false dead
+code**, the exact failure magma exists to prevent, and the same class as the macro defect. The
+oracle disagrees: `cargo check` on the multi-impl fixture reports nothing dead.
+
+This task builds the fixture that makes the fix testable, then fixes it.
 
 **Files:**
 - Create: `rust-helper/testdata/multi_impl/`
@@ -782,13 +803,52 @@ jq '[.calls[] | {from, to, kind}]' /tmp/mi.json
 
 Now compute, by hand from the ids, whether **both** `speak` impls are reachable from `main`. The two `speak` functions have distinct ids (Task 1) — that is precisely why ids were required.
 
-- [ ] **Step 4: Act on the finding**
+- [ ] **Step 4: Fix by over-approximating, mirroring Go's RTA**
 
-**If both impls are reachable from `main`:** resolution over-approximates (like Go's RTA) and is safe. Mark those edges `"dynamic"` in `walk.rs` by detecting a `dyn` receiver, and record the finding in the spec.
+Confirmed diagnosis (from Task 1): the call resolves to the trait's declared function, which is not
+enumerated, so the edge vanishes. The fix is to **over-approximate deliberately** — the same choice
+Go makes, and the safe direction: extra edges under-report dead code, missing edges invent it.
 
-**If only one impl is reachable:** this is a false-dead-code bug and MUST be fixed before parity. The fix is to over-approximate deliberately, mirroring Go's RTA: when a method call resolves through a trait, emit an edge to **every** impl of that trait method in the workspace. Look for the impl set via `ra_ap_hir` (grep the vendored source for an impls-of-trait query, e.g. `Impl::all_for_trait`); emit each as a `"dynamic"` edge.
+In `walk.rs`, when `resolve_method_call` returns a function whose container is a trait
+(`AsAssocItem::container(db)` → `AssocItemContainer::Trait(t)`), do not emit an edge to the
+declaration. Instead emit one `"dynamic"` edge to **every impl of that trait method in the
+workspace**. Find the impl set via `ra_ap_hir` — grep the vendored source at
+`~/.cargo/registry/src/*/ra_ap_hir-0.0.343/src/lib.rs` for an impls-for-trait query (candidates:
+`Impl::all_for_trait`, `Impl::all_for_type`); confirm the real name before using it rather than
+guessing.
 
-Either way, add a regression test asserting `cat_target` is reachable from `main`, with a comment stating **why**: rustc considers it live, so a graph that calls it dead diverges from the oracle and reports false dead code.
+Note this is precisely why edges carry `kind` (Task 4): these are genuinely dynamic dispatches, and
+`"dynamic"` labels them as the over-approximation they are — matching Go's `fidelity: "rta"`
+treatment of interface calls.
+
+- [ ] **Step 5: Verify against the oracle**
+
+```bash
+cd rust-helper && cargo build --release
+./target/release/magma-rust-helper-spike testdata/multi_impl > /tmp/mi.json
+jq '[.calls[] | select(.kind=="dynamic")] | length' /tmp/mi.json
+```
+Expected: at least 2 — one edge per impl of `Speak::speak`.
+
+Then confirm both impls are reachable from `main`, which is the property that matters:
+
+```bash
+jq -r '. as $g | [$g.functions[] | select(.symbol=="main") | .id][0] as $m
+  | [$g.calls[] | select(.from==$m) | .to] as $direct
+  | [$g.functions[] | select(.id as $i | any($direct[]; .==$i)) | .symbol]' /tmp/mi.json
+```
+Expected: includes **both** `speak` impls (two entries), not one.
+
+Also re-check the original fixture now emits 8 calls (the dyn edge is restored):
+
+```bash
+./target/release/magma-rust-helper-spike testdata/fixture | jq '.calls | length'
+```
+Expected: `8`.
+
+Add a regression test asserting `cat_target` is reachable from `main`, with a comment stating
+**why**: rustc considers it live, so a graph that calls it dead diverges from the oracle and
+reports false dead code.
 
 - [ ] **Step 5: Commit**
 
