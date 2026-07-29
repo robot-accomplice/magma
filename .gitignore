@@ -6,3 +6,7 @@ cover.out
 
 # scratch
 /tmp/
+
+# rust helper build output
+/rust-helper/target/
+/rust-helper/testdata/fixture/target/
