@@ -125,8 +125,16 @@ and `ast::MethodCallExpr` via `resolve_method_call`.
 | **total** | 43.4s | **48.4s** |
 
 Roughly **11× more edges for ~7% more wall time**. Correctness and performance point the same
-way, so there is no trade-off to adjudicate. 48s for a 575k-line workspace is acceptable for a
-pre-audit step, and freshness-skip keeps re-runs free.
+way, so there is no trade-off to adjudicate.
+
+> **SUPERSEDED — the numbers in this table predate the sysroot fix.** This section originally
+> concluded that "48s for a 575k-line workspace is acceptable for a pre-audit step." Both the
+> figures and that conclusion are stale: they were measured while `CargoConfig::default().sysroot`
+> was `None`, so the helper could not resolve any std macro and was blind to every call reachable
+> only through one. Re-measured, the same workspace yields **10,651 functions / 20,268 edges
+> (+64% edges) in 312.5s**. See §Runtime expectations below and research doc §9. The table is kept
+> because the `outgoing_calls`-vs-`Semantics` comparison it makes is still valid — both columns
+> were measured under the same blindness, so the *ratio* holds even though the absolutes do not.
 
 Two caveats carried into implementation:
 
