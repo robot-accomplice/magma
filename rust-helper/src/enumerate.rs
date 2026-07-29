@@ -1,8 +1,8 @@
 //! Workspace-local function discovery with full node metadata.
 
 use ra_ap_hir::{
-    AssocItem, Crate, DisplayTarget, HasAttrs, HasSource, HasVisibility, HirDisplay, ModuleDef,
-    Semantics, Visibility,
+    AsAssocItem, AssocItem, AssocItemContainer, Crate, DisplayTarget, HasAttrs, HasSource,
+    HasVisibility, HirDisplay, InFile, ModuleDef, Semantics, Visibility,
 };
 use ra_ap_ide_db::base_db::CrateOrigin;
 use ra_ap_ide_db::RootDatabase;
@@ -133,9 +133,79 @@ fn push(
             },
             signature: model::Signature { params, results },
             doc,
+            trait_impl: trait_impl_loc(db, sema, vfs, root, f),
         },
         f,
     ));
+}
+
+/// (file, line) locations the oracle-diff harness needs to key its trait-impl
+/// cascade-suppression check collision-proof (Task 13). `None` unless `f` is
+/// an assoc item of a *trait* impl (`impl Trait for Type { .. }`) — an
+/// inherent-impl method, a free function, or a trait declaration's own
+/// method never participates in rustc's cascade-suppression behaviour this
+/// exists to key off of (see the module comment in `roots.rs` for the same
+/// trait-impl/inherent-impl/trait-decl split, and `scripts/oracle-diff.sh`
+/// for how the oracle harness consumes this).
+fn trait_impl_loc(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    f: ra_ap_hir::Function,
+) -> Option<model::TraitImpl> {
+    let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else { return None };
+    let tr = imp.trait_(db)?; // None => inherent impl, not a trait impl.
+
+    let trait_src = tr.source(db)?;
+    let trait_decl = decl_loc(db, sema, vfs, root, trait_src)?;
+
+    // The self type only gates the cascade when it can independently receive
+    // its own dead_code diagnostic: a workspace-local struct/enum/union. A
+    // builtin (e.g. `i32` — the orphan rule means this shape can ONLY occur
+    // in a trait impl) or a type from another crate never gets one, however
+    // dead it is, so it must not be required to be "dead" for the cascade to
+    // apply — that is the Task 13 scoping-correction criterion.
+    let self_type_decl = imp.self_ty(db).as_adt().and_then(|adt| {
+        if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+            return None;
+        }
+        decl_loc(db, sema, vfs, root, adt.source(db)?)
+    });
+
+    Some(model::TraitImpl { trait_decl, self_type_decl })
+}
+
+/// Resolves an item's own declaration to a repo-relative (file, 1-based
+/// line), using its `name` node's position — same real-file/macro-expansion
+/// handling `push` uses for a function's own declaration, generalised over
+/// any named HIR item (`ra_ap_syntax::ast::HasName`).
+fn decl_loc<N: AstNode + HasName>(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    src: InFile<N>,
+) -> Option<model::Loc> {
+    let name_node = src.value.name()?;
+    let (file_id, line) = match src.file_id.file_id() {
+        Some(efid) => {
+            let file_id = efid.file_id(db);
+            let line = ra_ap_ide_db::line_index(db, file_id)
+                .line_col(name_node.syntax().text_range().start())
+                .line;
+            (file_id, line)
+        }
+        None => {
+            sema.parse_or_expand(src.file_id);
+            let range = sema.original_range(name_node.syntax());
+            let file_id = range.file_id.file_id(db);
+            let line =
+                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start()).line;
+            (file_id, line)
+        }
+    };
+    Some(model::Loc { file: repo_relative_path(vfs, root, file_id), line: line + 1 })
 }
 
 /// Repo-relative path for `file_id`, computed the same way for node metadata

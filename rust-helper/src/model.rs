@@ -50,6 +50,37 @@ pub struct Function {
     pub signature: Signature,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
+    /// Set only when this function is an assoc item of a *trait* impl
+    /// (`impl Trait for Type { .. }`) — never for free functions, inherent-
+    /// impl items, or a trait declaration's own method. Lets the oracle-diff
+    /// harness key its dead-code cascade-suppression check on declaration
+    /// (file, line) instead of a bare, collision-prone name (see
+    /// `scripts/oracle-diff.sh`/`.jq`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trait_impl: Option<TraitImpl>,
+}
+
+/// (file, line) locations the oracle-diff harness needs to test rustc's
+/// trait-impl cascade-suppression: rustc silences a per-method dead_code
+/// diagnostic when the enclosing trait/self-type cluster is itself dead.
+#[derive(Serialize)]
+pub struct TraitImpl {
+    /// Declaration site of the implemented trait.
+    pub trait_decl: Loc,
+    /// Declaration site of the self type, when it is a workspace-local
+    /// struct/enum/union eligible for its own dead_code diagnostic. `None`
+    /// for a builtin (e.g. `i32`) or externally-defined self type — those
+    /// can never receive a dead_code diagnostic from this workspace's own
+    /// `cargo check`, so their liveness can't gate the cascade the way a
+    /// local type's can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_type_decl: Option<Loc>,
+}
+
+#[derive(Serialize)]
+pub struct Loc {
+    pub file: String,
+    pub line: u32,
 }
 
 #[derive(Serialize)]
