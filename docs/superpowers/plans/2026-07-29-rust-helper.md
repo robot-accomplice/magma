@@ -1116,3 +1116,37 @@ case where the `as_adt()` requirement is wrong.
 
 Verification: `impl Tr2 for i32` → `m2` **root: true** (oracle silent); a private trait's impl on
 `i32` → **root: false** (oracle warns); and Task 5's full 7-case matrix must still pass unchanged.
+
+### Task 11: Enumerate `include!`-generated code (false dead code)
+
+**Found during Task 7's review; pre-existing, reproduced at base commit `2ad40ed` as well.**
+`enumerate::push` drops any function whose source resolves through macro expansion:
+
+```rust
+let Some(efid) = src.file_id.file_id() else { return };
+```
+
+`include!` is handled internally as a macro call, so `include!(concat!(env!("OUT_DIR"), "/generated.rs"))`
+— **the standard build-script codegen pattern** — never produces a node. `walk::edges` iterates only
+enumerated functions, so the generated function's outgoing calls are never walked either.
+
+Reproduced against the oracle: a `build.rs` emitting `pub fn generated_fn() { production_callee(); }`,
+`include!`d, with `main()` calling it. `cargo check` is **clean** — rustc sees
+`main → generated_fn → production_callee`. The helper enumerates 3 functions, emits **zero** edges,
+and leaves `production_callee` with no incoming edge. Direction: **false dead code**.
+
+This matters more than a rare edge case: `#[path = ...]` cannot take `concat!(env!(...))`, so
+`include!` is effectively the only mechanism for `OUT_DIR` codegen. magma executes build scripts
+*specifically* to make generated code visible (§Security in the spec) — this gate discards it.
+
+**Files:** `rust-helper/src/enumerate.rs`, `rust-helper/src/walk.rs`; new fixture
+`rust-helper/testdata/buildgen/` with a real `build.rs`.
+
+Teach enumeration to accept macro-expanded function definitions as real nodes and walk their
+bodies. Constraints that must not break: macro **descent** in `walk.rs` stays intact (Task 4/6),
+`outgoing_calls` never becomes the default, and the `generated` flag (Task 7) must be `true` for
+these nodes so magma's views can exclude them the way Go excludes cgo output.
+
+Verification: the fixture must emit an edge `generated_fn → production_callee`, `production_callee`
+must not be reported dead, and the generated node must carry `generated: true`. `testdata/fixture`
+(11 fns / 8 calls), `multi_impl`, and `libonly` must all be unchanged.
