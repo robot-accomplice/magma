@@ -1331,3 +1331,36 @@ Verification: with baselines committed, all fixtures exit 0. Introduce a deliber
 (e.g. revert one line of a helper fix) and confirm it exits non-zero naming the new FATAL. Delete
 a baseline entry the helper still produces and confirm that also fails. Both directions must fail
 loudly, and adding a baseline entry must require a stated reason.
+
+### Task 17: Column convention mismatch on non-ASCII source lines
+
+**Found during Task 13's re-review. Real, reproducible, and fails safe — but it degrades the
+measuring instrument's precision on any source line containing non-ASCII text.**
+
+Task 13 keys the oracle match on `(file, line, column)`. The two sides disagree on what a column
+is:
+
+- **ra_ap / the helper** emits a **UTF-8 byte** offset (confirmed in `line-index-0.1.2/src/lib.rs`,
+  documented as "Zero-based UTF-8 offset").
+- **rustc** emits a **character** column.
+
+Reproduction (`p_utf8b`): a dead function preceded on its own declaration line by a multi-byte
+comment — `/* 日本語コメント */ fn dead_fn() {}` — gives rustc `col: 22` and the helper `column: 36`.
+The keys never match, so the function surfaces as a **disclosed FATAL** rather than matching the
+oracle's verdict.
+
+**Why this is not urgent but is real:** byte offset is always ≥ character offset, so a mismatch can
+only ever cause a spurious *non*-match — a missed agreement or a missed cascade exclusion. It can
+**never** cause a spurious match, which is what would hide a divergence. The failure direction is
+therefore safe: it produces visible FATALs, never silent exclusions. But every non-ASCII line costs
+the instrument precision, and international codebases will hit it.
+
+**Files:** `rust-helper/src/enumerate.rs` (column computation), possibly `rust-helper/scripts/oracle-diff.jq`.
+
+Convert the byte offset to a character offset before emitting, or normalise both sides to a common
+convention. Grep `line-index` and `ra_ap_ide_db`'s line-index API for a character-column accessor
+before writing a conversion by hand.
+
+Verification: `p_utf8b` must have the helper and rustc columns agree, and the function must match
+the oracle instead of surfacing as a FATAL. All existing fixtures (ASCII-only) must be unchanged —
+`collision` 3/1, `libonly` 2/3, and `fixture`/`multi_impl`/`traitdecl`/`buildgen` at 0.
