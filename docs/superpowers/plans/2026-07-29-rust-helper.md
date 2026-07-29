@@ -1250,3 +1250,33 @@ sound — if so, say which and why).
 > real-workspace run (8,437 functions / 12,352 edges) predate the sysroot fix and were therefore
 > taken under a helper blind to all std-macro-mediated calls. Treat them as stale and re-measure
 > before citing them as parity evidence.
+
+### Task 14: Reduce the sysroot load cost
+
+Task 11's `sysroot = Some(RustLibSource::Discover)` fix is mandatory for correctness (+64% edges),
+but it added **80.1s** to every run — up from 1.8s, a 44× increase and now the single largest
+cost. Critically it is **fixed overhead**: independent of repo size, so it hurts small repos
+proportionally worse than the 575k-line workspace it was measured on.
+
+**Files:** `rust-helper/src/main.rs` (the `CargoConfig` construction), possibly `src/load.rs`.
+
+Investigate, in rough order of likely payoff:
+
+1. **Is it re-loaded per run when it need not be?** rust-analyzer caches sysroot metadata in its
+   own workflows; check whether `RustLibSource::Discover` re-discovers and re-parses std/core/alloc
+   every invocation, and whether a path-pinned variant (`RustLibSource::Path`) skips discovery.
+2. **Is the whole sysroot needed?** magma only resolves *macros* from std/core — it never
+   enumerates std functions (the `CrateOrigin::Local` filter discards them immediately). If
+   sysroot loading can be limited to what macro resolution requires, most of the cost may be
+   avoidable.
+3. **Can it be cached across runs?** magma already has a freshness mechanism; a sysroot fingerprint
+   (toolchain version + path) is stable across repos, so a cache would amortise across every
+   invocation on a machine, not just re-runs of one repo.
+
+Grep the vendored source for `RustLibSource`, `SysrootQueryMetadata`, and the sysroot loading path
+in `ra_ap_project_model-0.0.343` before choosing an approach — confirm real names, do not guess.
+
+**Verification:** correctness must not regress — roboticus-rust must still yield **10,651
+functions / 20,268 edges**, and all fixtures keep their current counts and FATAL status. Report
+the new load time and total against the 80.1s / 312.5s baseline. If the cost is irreducible, say
+so with evidence; that is a legitimate outcome and better than a fragile optimisation.
