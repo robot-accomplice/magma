@@ -1233,3 +1233,20 @@ sound — if so, say which and why).
 > Without this, Task 13 will ship believing it closed a gap it only half-closed, and `libonly`'s
 > two `priv_m` FATALs will remain. Two independent tasks (9 and 10) have now hit this mechanism
 > from different angles, which is the argument for prioritising it.
+
+> **Task 12 — CLOSED by Task 11, and its premise was wrong.** Verified by A/B reproduction at
+> Task 11's HEAD: `println!("{}", foo())` now emits `main → foo`; with Task 11's
+> `sysroot = Some(RustLibSource::Discover)` disabled and rebuilt, it emits zero edges —
+> exactly the defect this task was filed for.
+>
+> **Argument position was never the cause.** A call passed to a *local* `macro_rules!` macro
+> resolved correctly even with the sysroot disabled. The real mechanism is that `println!`,
+> `format!`, `write!`, `vec!`, `assert!`, `matches!` and friends are `macro_rules!` items defined
+> in std/core, and `Semantics::expand_macro_call` cannot expand a macro it cannot resolve. So
+> **any** call reachable only through a std macro — in any position — was silently invisible,
+> despite the macro-descent logic from Tasks 4 and 6 being present and correct.
+>
+> **Consequence for this plan's earlier evidence:** every fixture count and the roboticus-rust
+> real-workspace run (8,437 functions / 12,352 edges) predate the sysroot fix and were therefore
+> taken under a helper blind to all std-macro-mediated calls. Treat them as stale and re-measure
+> before citing them as parity evidence.
