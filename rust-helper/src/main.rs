@@ -1,5 +1,6 @@
 // Spike: Semantics-based edge extraction with macro descent.
 // Compares against outgoing_calls. usage: helper <root> [--outgoing]
+mod enumerate;
 mod model;
 
 use std::collections::HashMap;
@@ -7,13 +8,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use ra_ap_cfg::{CfgAtom, CfgDiff};
-use ra_ap_hir::{AssocItem, Crate, HasSource, ModuleDef, PathResolution, Semantics};
+use ra_ap_hir::{HasSource, ModuleDef, PathResolution, Semantics};
 use ra_ap_ide::{AnalysisHost, CallHierarchyConfig, FilePosition};
-use ra_ap_ide_db::base_db::CrateOrigin;
 use ra_ap_ide_db::ra_fixture::RaFixtureConfig;
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_intern::sym;
 use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
+use ra_ap_paths::AbsPathBuf;
 use ra_ap_project_model::{CargoConfig, CfgOverrides};
 use ra_ap_syntax::ast::{self, HasName};
 use ra_ap_syntax::{AstNode, SyntaxNode};
@@ -35,63 +36,41 @@ fn main() -> anyhow::Result<()> {
         num_worker_threads: 4,
         proc_macro_processes: 1,
     };
-    let (db, _vfs, _p) =
+    let (db, vfs, _p) =
         load_workspace_at(Path::new(&root), &cargo_config, &load_config, &|_s| {})?;
     eprintln!("TIMING load_workspace: {:.1}s", t0.elapsed().as_secs_f64());
+
+    // Same absolute-path computation load_workspace_at uses internally, so
+    // stripping this prefix from vfs paths yields a repo-relative path.
+    let root_abs = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(&root));
 
     let host = AnalysisHost::with_database(db);
     let analysis = host.analysis();
     let db = host.raw_database();
 
     let t1 = Instant::now();
-    let mut funcs: Vec<(String, FilePosition, ra_ap_hir::Function)> = Vec::new();
-    for krate in Crate::all(db) {
-        if !matches!(krate.origin(db), CrateOrigin::Local { .. }) {
-            continue;
-        }
-        for module in krate.modules(db) {
-            for decl in module.declarations(db) {
-                if let ModuleDef::Function(f) = decl {
-                    if let Some(p) = pos_of(db, f) {
-                        funcs.push((f.name(db).as_str().to_owned(), p, f));
-                    }
-                }
-            }
-            for imp in module.impl_defs(db) {
-                for item in imp.items(db) {
-                    if let AssocItem::Function(f) = item {
-                        if let Some(p) = pos_of(db, f) {
-                            funcs.push((f.name(db).as_str().to_owned(), p, f));
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Function ids are the index of the function in the enumeration vector.
+    let funcs: Vec<(model::Function, ra_ap_hir::Function)> =
+        enumerate::collect(db, &vfs, root_abs.as_path());
     eprintln!(
         "TIMING enumerate: {:.1}s for {} functions",
         t1.elapsed().as_secs_f64(),
         funcs.len()
     );
 
-    // Function ids are the index of the function in the enumeration vector.
-    let functions: Vec<model::Function> = funcs
-        .iter()
-        .enumerate()
-        .map(|(i, (n, _pos, _f))| model::Function { id: i as u32, symbol: n.clone() })
-        .collect();
     let index: HashMap<ra_ap_hir::Function, u32> =
-        funcs.iter().enumerate().map(|(i, (_n, _p, f))| (*f, i as u32)).collect();
+        funcs.iter().map(|(mf, f)| (*f, mf.id)).collect();
 
     let t2 = Instant::now();
     let mut edges = 0usize;
     let mut calls: Vec<model::Call> = Vec::new();
     if use_outgoing {
         let cfg = CallHierarchyConfig { exclude_tests: false, ra_fixture: RaFixtureConfig::default() };
-        for (n, pos, _f) in &funcs {
-            if let Ok(Some(items)) = analysis.outgoing_calls(&cfg, *pos) {
+        for (mf, f) in &funcs {
+            let Some(pos) = pos_of(db, *f) else { continue };
+            if let Ok(Some(items)) = analysis.outgoing_calls(&cfg, pos) {
                 for it in &items {
-                    println!("EDGE\t{}\t{}", n, it.target.name);
+                    println!("EDGE\t{}\t{}", mf.symbol, it.target.name);
                 }
                 edges += items.len();
             }
@@ -105,7 +84,7 @@ fn main() -> anyhow::Result<()> {
         edges = ra_ap_hir::attach_db(db, || {
             let sema = Semantics::new(db);
             let mut n_edges = 0usize;
-            for (i, (_n, _pos, f)) in funcs.iter().enumerate() {
+            for (i, (_mf, f)) in funcs.iter().enumerate() {
                 let Some(src) = f.source(db) else { continue };
                 if let Some(efid) = src.file_id.file_id() {
                     let _ = sema.parse(efid);
@@ -130,6 +109,7 @@ fn main() -> anyhow::Result<()> {
     eprintln!("TIMING TOTAL: {:.1}s", t0.elapsed().as_secs_f64());
 
     if !use_outgoing {
+        let functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
         let out = model::Output::new(functions, calls);
         println!("{}", serde_json::to_string_pretty(&out)?);
     }

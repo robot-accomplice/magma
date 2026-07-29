@@ -26,6 +26,25 @@ impl Output {
 pub struct Function {
     pub id: u32,
     pub symbol: String,
+    /// Crate + module path, e.g. "mycrate::net::client".
+    pub pkg: String,
+    /// Repo-relative path.
+    pub file: String,
+    pub line: u32,
+    /// "func" for free functions AND associated fns without a receiver;
+    /// "method" for anything with a `self` receiver.
+    pub kind: String,
+    /// `pub` visibility. Load-bearing: for a library this also determines root
+    /// status, because rustc treats a lib's public API as the root set.
+    pub exported: bool,
+    /// Declared in test code (`Function::is_test`).
+    pub test: bool,
+    /// An entry point: a bin `main`, or a lib `pub` item. Set in Task 5.
+    pub root: bool,
+    /// Benchmark function (`Function::is_bench`) — counts toward all-roots only.
+    pub bench: bool,
+    /// Build-script- or macro-generated code.
+    pub generated: bool,
 }
 
 /// One call edge. Endpoints are Function ids.
