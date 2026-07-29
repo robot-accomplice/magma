@@ -196,6 +196,38 @@ honest-refusal principles. Flagged for explicit confirmation.
   interfaces, user-installed analyzers, a hand-rolled front end) is less secure and less
   maintained. This is a standing maintenance cost the Go backend never had (`x/tools` is stable).
 
+## 7a. The Go backend's correctness facts apply to Rust — carry them as requirements
+
+During this spike the helper reproduced a bug the Go backend had **already found, fixed, and
+documented**: it enumerated every crate in the database (118,081 functions on roboticus-rust),
+including all dependencies and std, because it never filtered to workspace members. HANDOFF.md
+records the identical Go failure:
+
+> **Restrict nodes to the module** (`inModule`/`moduledPath`). Without it the graph includes the
+> entire dependency closure (47k nodes, 7.7k false "dead").
+
+rust-analyzer's equivalent filter is `Crate::origin(db)` matching
+`CrateOrigin::Local { .. }` ("crates that are workspace members"), imported from
+`ra_ap_ide_db::base_db`.
+
+**This was avoidable.** The correctness facts live in a handoff document as prose, so fresh
+extraction code does not inherit them. The Rust spec must restate them as explicit, testable
+requirements rather than leaving them as tribal knowledge. At minimum, the Rust analogue of each:
+
+1. **Restrict to workspace-local crates** (`CrateOrigin::Local`) — else the dependency closure
+   floods the graph and produces false dead code.
+2. **Separate production and test reachability** — Go needed two package loads; rust-analyzer
+   offers `CallHierarchyConfig { exclude_tests }`, but see §7: it is currently unproven because
+   `cfg(test)` is off by default.
+3. **Exclude test-declared functions from the test-only view** — Go counted ~9,000 false rows
+   before this filter. The Rust analogue must be identified explicitly.
+4. **Exclude generated code from both views** — Go had 92 false test-only rows from cgo-generated
+   `init` functions. Rust's analogue is build-script- and macro-generated code, which magma will
+   now see *because* it executes build scripts (§4).
+5. **Refuse when there is no production root** — Go refuses the views when a scope has no non-test
+   `main`. Rust's roots are richer (bin targets, lib `pub` API, examples, benches) and the
+   equivalent refusal condition must be defined, not assumed.
+
 ## 8. Recommended shape for the spec
 
 1. magma ships a Rust helper binary; magma (Go) invokes it as a subprocess and reads JSON.
