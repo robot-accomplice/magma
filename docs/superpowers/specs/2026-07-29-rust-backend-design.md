@@ -82,9 +82,37 @@ Extraction walks each function body and resolves call expressions using
 `ra_ap_hir::Semantics`: `descend_into_macros*` for expansion, `resolve_method_call` /
 `resolve_method_call_fallback` for method dispatch, `resolve_path` for paths.
 
-**Unmeasured:** the `Semantics` walker's performance. `outgoing_calls` cost 29.4s for 4,515 edges;
-the replacement will find more edges and has no measurement. Re-measure during implementation; if
-it regresses badly, that is a design signal, not a tuning task.
+### Built and verified (2026-07-29)
+
+The walker is no longer hypothetical. Implemented and run against the fixture, it **recovers the
+macro edge** `outgoing_calls` drops:
+
+```
+outgoing_calls (7 edges)          semantics walker (8 edges)
+  gen_call → generic_target         gen_call → generic_target
+  live → helper                     live → helper
+  main → gen_call                   main → gen_call
+  main → live                       main → live
+  main → speak                      main → macro_target      <-- RECOVERED
+  speak → dyn_target                main → speak
+  t → only_test                     speak → dyn_target
+                                    t → only_test
+```
+
+Derived reachability now matches the compiler oracle exactly: dead = `{dead}`, test-only =
+`{only_test}`. That is the parity condition, met on the fixture.
+
+**Implementation requirement discovered — `attach_db` is mandatory.** rust-analyzer's type
+inference requires the salsa database attached to the calling thread. `Analysis::with_db` does
+this internally (`hir::attach_db_allow_change`), but `Semantics` used directly does **not** — and
+inference panics deep inside `hir_ty::next_solver::interner` with *"Try to use attached db, but
+not db is attached"*. All `Semantics` work must be wrapped in `ra_ap_hir::attach_db(db, || …)`.
+This is not discoverable from the `Semantics` API surface; it cost a crash to find.
+
+Walker shape: descend every body node; on `ast::MacroCall`, expand via
+`Semantics::expand_macro_call` and recurse into the expansion (depth-capped against pathological
+recursion); resolve `ast::CallExpr` paths via `resolve_path` → `PathResolution::Def(Function)`,
+and `ast::MethodCallExpr` via `resolve_method_call`.
 
 ## The five correctness facts, as Rust requirements
 
