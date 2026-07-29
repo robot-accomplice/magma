@@ -1280,3 +1280,22 @@ in `ra_ap_project_model-0.0.343` before choosing an approach — confirm real na
 functions / 20,268 edges**, and all fixtures keep their current counts and FATAL status. Report
 the new load time and total against the 80.1s / 312.5s baseline. If the cost is irreducible, say
 so with evidence; that is a legitimate outcome and better than a fragile optimisation.
+
+### Task 15: Emit `executed_target_code`
+
+One boolean, decided in the spec (§DECIDED). The helper is where the fact is known — it is the
+process that runs build scripts and proc macros — so it emits it and magma's Go side passes it
+through rather than re-deriving it.
+
+**Files:** `rust-helper/src/model.rs`, `rust-helper/src/main.rs`.
+
+Add `executed_target_code: bool` to `Output` (and to `Refusal`, where it is always `false` — a
+refusal means nothing ran). For `Output` it is `true` whenever the workspace loaded with
+`load_out_dirs_from_check: true` and the sysroot proc-macro server active, which is the only
+configuration the helper currently uses — so it is `true` in practice, but derive it from the
+actual `LoadCargoConfig` rather than hard-coding it, so it stays honest if a future sandboxed or
+no-execution mode is added.
+
+**Verification:** every fixture's JSON carries `"executed_target_code": true`; a refusal artifact
+(private-items-only crate) carries `false`; no other field changes; all fixtures keep their
+current function/edge counts and FATAL status.
