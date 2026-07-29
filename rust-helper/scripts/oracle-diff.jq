@@ -3,12 +3,13 @@
 # line prefixed "SUMMARY " for scripted consumption.
 #
 # Inputs (all provided via --slurpfile from oracle-diff.sh):
-#   $helper      - [helper.json]                    functions + calls
-#   $oracle      - [{file, line}, ...]              oracle dead_code primary spans
-#   $excluded    - [{id, reason}, ...]              attribute-based exclusions
-#   $impl_info   - [{id, trait, type}, ...]          enclosing impl of each method (source-scanned)
-#   $dead_traits - ["TraitName", ...]                traits the oracle independently reports dead
-#   $dead_types  - ["TypeName", ...]                 types the oracle independently reports dead
+#   $helper          - [helper.json]                    functions + calls
+#   $oracle          - [{file, line}, ...]              oracle dead_code primary spans
+#   $excluded        - [{id, reason}, ...]              attribute-based exclusions
+#   $impl_info       - [{id, trait, type}, ...]          enclosing impl of each method (source-scanned)
+#   $decl_trait_info - [{id, trait}, ...]                enclosing trait DECLARATION of each method (source-scanned)
+#   $dead_traits     - ["TraitName", ...]                traits the oracle independently reports dead
+#   $dead_types      - ["TypeName", ...]                 types the oracle independently reports dead
 
 def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
 
@@ -16,6 +17,7 @@ def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
 | ($oracle[0] // []) as $oracle_spans
 | ($excluded[0] // []) as $attr_excl
 | ($impl_info[0] // []) as $impl_list
+| ($decl_trait_info[0] // []) as $decl_trait_list
 | ($dead_traits[0] // []) as $dead_trait_list
 | ($dead_types[0] // []) as $dead_type_list
 
@@ -29,6 +31,13 @@ def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
 # independently-dead trait/type name sets — together drive the trait-impl
 # cascade-suppression check (see the comment block in oracle-diff.sh).
 | (reduce $impl_list[] as $e ({}; . + {($e.id|tostring): $e})) as $impl_map
+# Enclosing trait DECLARATION (not impl) keyed by function id — see the
+# comment block in oracle-diff.sh: rustc's dead_code lint has no per-method
+# diagnostic for a trait-declared method, live or dead, only one for the
+# trait as a whole — so any function found here is excluded below, not
+# compared (unlike the impl-cascade map, which only ever narrows an
+# already-independently-confirmed-dead pair).
+| (reduce $decl_trait_list[] as $e ({}; . + {($e.id|tostring): $e.trait})) as $decl_trait_map
 | (reduce $dead_trait_list[] as $t ({}; . + {($t): true})) as $dead_trait_map
 | (reduce $dead_type_list[] as $t ({}; . + {($t): true})) as $dead_type_map
 
@@ -64,6 +73,8 @@ def fmt(x): "  \(x.pkg)::\(x.symbol)  (\(x.file):\(x.line), id=\(x.id))";
             then "attribute: " + $attr_map[($f.id|tostring)]
           elif $cascade
             then "trait-impl-cascade (trait `\($im.trait)` and type `\($im.type)` both reported dead by the oracle)"
+          elif ($decl_trait_map[($f.id|tostring)] != null)
+            then "trait-declaration method (trait `\($decl_trait_map[($f.id|tostring)])` — oracle has no independent per-method verdict)"
           else null
           end
         ),
