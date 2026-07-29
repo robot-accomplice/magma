@@ -297,8 +297,9 @@ Until (2) passes set-identically, Rust does not ship. That is what decision 1 me
 ## Sequencing
 
 1. Helper skeleton: load workspace, enumerate workspace-local functions (requirement 1), emit JSON.
-2. `cfg(test)` enablement + the prod/test split — **the unproven piece**; resolve early, since
-   requirement 2 is load-bearing for both views.
+2. `cfg(test)` enablement + the prod/test split — **resolved during the spike** (`exclude_tests`
+   falsified; use `is_test`/`is_main`/`is_bench` + two reachability walks). Port the proven
+   approach rather than re-deriving it.
 3. `Semantics` body-walking with macro descent; re-measure performance.
 4. Go-side backend: invoke, map to `contract.Graph`, derive views.
 5. Oracle cross-check + fail-loud.
@@ -306,4 +307,6 @@ Until (2) passes set-identically, Rust does not ship. That is what decision 1 me
 7. Parity validation (§Validation) — the gate on shipping.
 8. Release pipeline: cross-compile the helper per platform.
 
-Steps 2 and 3 carry the real risk; everything else is mechanical. Both are early by design.
+Steps 2 and 3 were the design's two real risks. **Both were retired during the spike** — the
+prod/test split is settled and the Semantics walker is built, verified against the oracle, and
+performance-measured. What remains is porting proven approaches, not discovering them.
