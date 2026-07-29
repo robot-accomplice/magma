@@ -16,15 +16,23 @@
 //!     over-marks) but incomplete: it misses exactly that re-export-bridge
 //!     case, which is the dangerous direction to get wrong (it invents false
 //!     dead code for live public API).
+//!   - A method's public-API status is not a property of the *method's own*
+//!     module chain at all — it's a property of its `impl`'s self type (and,
+//!     for a trait impl, the trait too). A privately-declared type re-exported
+//!     via `pub use` makes every public method on it live, even though the
+//!     method's own declaring module is still private. `is_public_method`
+//!     answers this by testing the self type (and trait) against the same
+//!     reachable set `public_reachable` already computes for free items —
+//!     types show up in `Module::scope` exactly like functions and modules do.
 //!
-//! `public_reachable` fixes that by walking `Module::scope`, which surfaces
-//! `use`-imported names alongside declared ones — so a `pub use` re-export of
-//! a privately-nested item shows up directly at the reachable module, without
-//! needing to descend into the private module at all.
+//! `public_reachable` walks `Module::scope`, which surfaces `use`-imported
+//! names alongside declared ones — so a `pub use` re-export of a privately-
+//! nested item (function, type, or trait) shows up directly at the reachable
+//! module, without needing to descend into the private module at all.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use ra_ap_hir::{Crate, HasVisibility, ModuleDef, ScopeDef, Visibility};
+use ra_ap_hir::{AsAssocItem, AssocItemContainer, Crate, HasVisibility, ModuleDef, ScopeDef, Visibility};
 use ra_ap_ide_db::RootDatabase;
 
 use crate::model;
@@ -35,7 +43,7 @@ use crate::model;
 /// all-roots view — even a `#[test] fn main`.
 pub fn mark(db: &RootDatabase, funcs: &mut [(model::Function, ra_ap_hir::Function)]) {
     // BFS is per-crate; cache it since a workspace's functions share crates.
-    let mut public_by_crate: HashMap<Crate, HashSet<ra_ap_hir::Function>> = HashMap::new();
+    let mut public_by_crate: HashMap<Crate, HashSet<ModuleDef>> = HashMap::new();
     for (node, f) in funcs.iter_mut() {
         if node.test {
             node.root = false;
@@ -44,22 +52,28 @@ pub fn mark(db: &RootDatabase, funcs: &mut [(model::Function, ra_ap_hir::Functio
         let krate = f.module(db).krate(db);
         let public =
             public_by_crate.entry(krate).or_insert_with(|| public_reachable(db, krate));
-        node.root = f.is_main(db) || public.contains(f) || all_ancestors_public(db, *f);
+        node.root = f.is_main(db)
+            || public.contains(&ModuleDef::Function(*f))
+            || all_ancestors_public(db, *f)
+            || is_public_method(db, *f, public);
     }
 }
 
 /// BFS from the crate root through `Module::scope(db, None)` (unfiltered: this
 /// surfaces both items declared in a module AND items brought into it via
 /// `use`/`pub use`, which is exactly what lets a re-export bridge a privately
-/// nested item back out). At each entry, `Function`/`Module::visibility(db)`
-/// — the item's own fixed, declaration-site visibility, a plain data
-/// comparison, not a from-module query — decides inclusion: a bare `pub fn`
-/// or `pub mod` passes, `pub(crate)`/private does not. Recursion only
-/// descends into modules whose own visibility is `Public`, so a private `mod`
-/// is never expanded (its un-re-exported contents are correctly never
-/// discovered) — but a `pub use private_mod::item;` sitting in an already-
-/// reachable module still surfaces `item` directly, without ever needing to
-/// enter `private_mod`.
+/// nested item back out). At each entry, `ModuleDef::visibility(db)` — the
+/// item's own fixed, declaration-site visibility, a plain data comparison,
+/// not a from-module query — decides inclusion: a bare `pub` binding passes,
+/// `pub(crate)`/private does not. Recursion only descends into modules whose
+/// own visibility is `Public`, so a private `mod` is never expanded (its
+/// un-re-exported contents are correctly never discovered) — but a
+/// `pub use private_mod::item;` sitting in an already-reachable module still
+/// surfaces `item` directly, without ever needing to enter `private_mod`.
+///
+/// Collects every kind of publicly reachable `ModuleDef`, not just functions:
+/// types (`Adt`) and traits are needed too, so `is_public_method` can test an
+/// `impl`'s self type and trait against this same set.
 ///
 /// Known gap: this cannot distinguish a `pub use` from a plain `use` of the
 /// same target — both bring the name into the reachable module's scope, and
@@ -70,7 +84,7 @@ pub fn mark(db: &RootDatabase, funcs: &mut [(model::Function, ra_ap_hir::Functio
 /// is not exercised by any fixture in this repo; distinguishing the two needs
 /// per-binding import visibility, which is not reachable through `ra_ap_hir`'s
 /// public API without depending on `ra_ap_hir_def` internals directly.
-fn public_reachable(db: &RootDatabase, krate: Crate) -> HashSet<ra_ap_hir::Function> {
+fn public_reachable(db: &RootDatabase, krate: Crate) -> HashSet<ModuleDef> {
     let mut found = HashSet::new();
     let mut visited = HashSet::new();
     let mut queue = VecDeque::from([krate.root_module(db)]);
@@ -79,19 +93,14 @@ fn public_reachable(db: &RootDatabase, krate: Crate) -> HashSet<ra_ap_hir::Funct
             continue;
         }
         for (_, def) in m.scope(db, None) {
-            match def {
-                ScopeDef::ModuleDef(ModuleDef::Function(f))
-                    if f.visibility(db) == Visibility::Public =>
-                {
-                    found.insert(f);
-                }
-                ScopeDef::ModuleDef(ModuleDef::Module(sub))
-                    if sub.visibility(db) == Visibility::Public =>
-                {
-                    queue.push_back(sub);
-                }
-                _ => {}
+            let ScopeDef::ModuleDef(md) = def else { continue };
+            if md.visibility(db) != Visibility::Public {
+                continue;
             }
+            if let ModuleDef::Module(sub) = md {
+                queue.push_back(sub);
+            }
+            found.insert(md);
         }
     }
     found
@@ -102,12 +111,35 @@ fn public_reachable(db: &RootDatabase, krate: Crate) -> HashSet<ra_ap_hir::Funct
 /// this is true, a direct `crate::a::b::item` path exists, so it never
 /// over-marks — but it misses re-export bridges, which `public_reachable`
 /// handles for free items (and this fallback is redundant for them: anything
-/// it finds true, the BFS above finds true too, by construction). Associated
-/// items (methods) never appear in `Module::scope` — they're reached via
-/// `Type::method`, not `module::name` — so this is the only signal available
-/// for them; a method whose type is re-exported from a private module is a
-/// known, undetected gap here.
+/// it finds true, the BFS above finds true too, by construction). For
+/// associated items (methods), this is only correct when the method's own
+/// declaring module chain is genuinely all-`pub` with no re-export involved —
+/// `is_public_method` covers the re-export case; this stays as a fallback for
+/// shapes `is_public_method` can't resolve (e.g. an impl on a builtin/
+/// primitive type, which has no `Adt` to look up).
 fn all_ancestors_public(db: &RootDatabase, f: ra_ap_hir::Function) -> bool {
     f.visibility(db) == Visibility::Public
         && f.module(db).path_to_root(db).into_iter().all(|m| m.visibility(db) == Visibility::Public)
+}
+
+/// A method's public-API status is a property of its `impl`, not its own
+/// declaring module: `f` is a root if it is itself `pub` AND the `impl`'s
+/// self type is in the reachable set — and, for a trait impl, the trait is
+/// too. Requires the self type to resolve to an `Adt` (struct/enum/union);
+/// impls on other type shapes (builtins, tuples, references, ...) fall
+/// through to `all_ancestors_public` instead.
+fn is_public_method(db: &RootDatabase, f: ra_ap_hir::Function, public: &HashSet<ModuleDef>) -> bool {
+    if f.visibility(db) != Visibility::Public {
+        return false;
+    }
+    let Some(assoc) = f.as_assoc_item(db) else { return false };
+    let AssocItemContainer::Impl(imp) = assoc.container(db) else { return false };
+    let Some(adt) = imp.self_ty(db).as_adt() else { return false };
+    if !public.contains(&ModuleDef::Adt(adt)) {
+        return false;
+    }
+    match imp.trait_(db) {
+        None => true,
+        Some(tr) => public.contains(&ModuleDef::Trait(tr)),
+    }
 }
