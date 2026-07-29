@@ -21,3 +21,12 @@ mod internal {
 fn main() {
     assert_eq!(2 + 2, 4);
 }
+
+/// A `pub fn` in a private module, re-exported at the crate root. Unlike
+/// `internal::pub_in_private_mod` above (never re-exported, correctly NOT a
+/// root), rustc's dead_code lint reports zero warnings for `thing` — the
+/// `pub use` bridges it out, so it IS live public API and must be a root.
+mod facade {
+    pub fn thing() {}
+}
+pub use facade::thing;
