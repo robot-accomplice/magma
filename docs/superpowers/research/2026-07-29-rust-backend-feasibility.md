@@ -329,6 +329,34 @@ was handed to the coordinator as a separate, independently-run background task
 folded in separately when that lands. Either way, this remains a one-time cost per workspace, not
 recurring, once `target/` is warm.
 
+**Critical finding from that real-workspace run — an empty oracle is not a clean one, and the
+harness could not originally tell the difference.** The coordinator's own runs against
+`roboticus-rust` (warm, after touching every `.rs` file, and after `cargo clean -p
+roboticus-core`) all produced the same result: 744 `compiler-artifact`, 77
+`build-script-executed`, 1 `build-finished`, **zero `compiler-message`** — no diagnostics of any
+kind. `cargo check` only emits diagnostics for crates it actually recompiles; on a warm `target/`
+it silently replays cached artifacts and says nothing, which the harness originally read as "the
+compiler considers nothing dead" and scored as full agreement — a false green, indistinguishable
+from a genuinely clean workspace, for the tool whose entire purpose is making parity measurable.
+A naive fix (refuse when total `compiler-message` count is zero) is itself wrong: `testdata/multi_impl`
+is a genuinely warning-free fixture and produces zero `compiler-message` entries even on a truly
+fresh, cold `cargo check` — message-count alone cannot distinguish "just checked, nothing to
+report" from "never re-checked, silently cached," because both look identical on stdout. The fix
+uses cargo's own freshness signal instead: `cargo check -v` prints `Checking <pkg>`/`Compiling
+<pkg>` to stderr when rustc actually runs, versus `Fresh <pkg>` when it's skipped — verified
+directly (identical crate, back to back: `Checking` + a `Running rustc ...` line on a clean build,
+`Fresh` with no rustc invocation on the immediate rerun; `compiler-artifact` count was identical
+in both cases, so that signal doesn't work either). `oracle-diff.sh` now cross-references every
+workspace-local package name (`cargo metadata --no-deps`) against the set that actually shows
+`Compiling`/`Checking` this run, and refuses (exit 5, naming the stale packages, with a `cargo
+clean` remediation and an honest cost warning — cold checks on a large workspace take minutes to
+tens of minutes) if any workspace package was skipped. Verified: all three fixtures fresh
+(`cargo clean` then run) still score FATAL=0 as before, including `multi_impl`'s genuine
+zero-diagnostics clean pass, which now correctly proceeds instead of refusing; running any
+fixture a second time with no clean in between now refuses with exit 5 every time. **Anyone
+running this harness against a real workspace with a warm `target/` needs `cargo clean` first, or
+the harness will refuse rather than silently hand back a meaningless green.**
+
 **Normalisation, final state:** two disclosed categories (`test:true`, `trait-impl-cascade`,
 above) plus attribute suppression. A third, undisclosed heuristic ("test-module-nested" — exclude
 any function whose module path contained a `test`/`tests` segment) was tried during

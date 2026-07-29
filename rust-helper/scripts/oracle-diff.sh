@@ -10,6 +10,12 @@
 # script computes reachability itself (BFS from `root` functions over `calls`)
 # and is therefore the only place that derives a dead set to compare.
 #
+# REFUSES (exit 5) if `cargo check` emits zero `compiler-message` entries.
+# `cargo check` only diagnoses crates it recompiles; on a warm `target/` it
+# silently replays cached artifacts and says nothing at all — indistinguishable
+# from a genuinely clean workspace unless this is checked explicitly. Reporting
+# agreement in that case would be a false green. See the refusal branch below.
+#
 # Normalisation (functions the oracle cannot render a verdict on, so they are
 # excluded from BOTH directions, counted, and reported — never silently
 # dropped):
@@ -70,9 +76,68 @@ if jq -e '.computable == false' "$WORK/helper.json" >/dev/null 2>&1; then
 fi
 
 echo "== running oracle (cargo check) on $REPO_ABS ==" >&2
-( cd "$REPO_ABS" && cargo check --workspace --message-format=json 2>"$WORK/cargo.stderr" ) \
+# -v (verbose) makes cargo print one "Fresh <pkg>" / "Compiling <pkg>" /
+# "Checking <pkg>" progress line per unit to stderr, alongside the JSON
+# stream on stdout. This is the ONLY reliable signal for "did rustc actually
+# run for this crate this invocation" — message-format=json output cannot
+# tell you that (see the freshness check below for why).
+( cd "$REPO_ABS" && cargo check --workspace -v --message-format=json 2>"$WORK/cargo.stderr" ) \
   > "$WORK/cargo.jsonl" || true
 tail -20 "$WORK/cargo.stderr" >&2 || true
+
+# A crate cargo considers "Fresh" (fingerprint unchanged since the last
+# check) is never handed to rustc at all this invocation — cargo just
+# replays that fact, silently. It emits NO compiler-message for it (not even
+# "still clean"), but it can *also* emit no compiler-artifact/other-reason
+# difference either — verified directly: testdata/multi_impl is a
+# genuinely warning-free crate, and a truly FRESH `cargo check` on it also
+# produces zero `compiler-message` entries (nothing was ever wrong to
+# report), so counting compiler-message alone cannot distinguish "just
+# checked, clean" from "never re-checked, silently cached" — both look
+# identical on stdout. Only -v's stderr progress line tells them apart:
+# "Checking multi_impl ..." (real compile happened) vs "Fresh multi_impl ..."
+# (skipped, nothing this run confirms or denies about its dead_code status).
+#
+# So the actual freshness check is per *workspace-local package*: every
+# workspace member must show a "Compiling"/"Checking" line this run, or its
+# functions' dead_code silence is not evidence of anything.
+workspace_packages="$(cd "$REPO_ABS" && cargo metadata --no-deps --format-version=1 2>/dev/null | jq -r '.packages[].name')"
+checked_packages="$(awk '/^[[:space:]]*(Compiling|Checking)[[:space:]]+/ { print $2 }' "$WORK/cargo.stderr" | sort -u)"
+
+stale_packages=""
+while IFS= read -r pkg; do
+  [[ -z "$pkg" ]] && continue
+  if ! grep -qxF "$pkg" <<<"$checked_packages"; then
+    stale_packages="$stale_packages$pkg"$'\n'
+  fi
+done <<<"$workspace_packages"
+
+if [[ -n "$stale_packages" ]]; then
+  echo "" >&2
+  echo "REFUSED: at least one workspace-local crate was NOT actually recompiled" >&2
+  echo "by cargo check this run — cargo replayed a cached (\"Fresh\") result for" >&2
+  echo "it instead of invoking rustc, so its dead_code status this run is" >&2
+  echo "UNKNOWN, not confirmed clean. This is not the same as \"the compiler" >&2
+  echo "found nothing wrong\": a genuinely fresh, warning-free crate ALSO emits" >&2
+  echo "zero compiler-message entries, so message-count alone cannot tell a" >&2
+  echo "trustworthy clean result apart from a silently-skipped one — only" >&2
+  echo "cargo's own \"Fresh\" vs \"Checking\" progress line can. Reporting" >&2
+  echo "agreement here would be a false green for the one tool whose job is" >&2
+  echo "measuring parity, not claiming it." >&2
+  echo "" >&2
+  echo "Stale (not recompiled this run):" >&2
+  echo "$stale_packages" | sed 's/^/    /' >&2
+  echo "Fix: force fresh compilation, then re-run this harness against the same" >&2
+  echo "workspace:" >&2
+  echo "    cargo clean --manifest-path \"$REPO_ABS/Cargo.toml\"" >&2
+  echo "(whole workspace — \"cargo clean -p <crate>\" is not sufficient, it only" >&2
+  echo "clears one crate and leaves the rest of the dependency graph cached, which" >&2
+  echo "is often enough to leave the workspace crates themselves stale too.) This" >&2
+  echo "is expensive on a large workspace: a cold \`cargo check\` can take minutes" >&2
+  echo "to tens of minutes. That cost is the price of a trustworthy oracle." >&2
+  exit 5
+fi
+echo "oracle: all $(wc -l <<<"$workspace_packages" | tr -d ' ') workspace-local crate(s) actually recompiled this run — proceeding" >&2
 
 # Oracle dead set, keyed by "file:line" of each dead_code diagnostic's primary
 # span (not by name — two functions can share a name, but never a file+line).
