@@ -95,15 +95,37 @@ not inherit them — the spike reproduced one of them as a live bug. They are re
 | # | requirement | Rust mechanism | evidence if violated |
 |---|---|---|---|
 | 1 | Restrict to workspace-local code | `Crate::origin(db)` = `CrateOrigin::Local` (from `ra_ap_ide_db::base_db`) | measured: 118,081 functions unfiltered vs **3,289** filtered — 97% is deps/std |
-| 2 | Separate production from test reachability | two analyses; `cfg(test)` enabled via `CargoConfig.cfg_overrides` | Go needed two package loads and got it wrong twice |
+| 2 | Separate production from test reachability | **one graph, two reachability walks** — `cfg(test)` enabled via `CargoConfig.cfg_overrides`; nodes flagged with `Function::is_test` / `is_main` / `is_bench`; magma walks reachability from all roots and from production roots separately | Go needed two package loads and got it wrong twice |
 | 3 | Exclude test-declared functions from test-only | identify `#[cfg(test)]`/test-target declarations | Go had ~9,000 false rows |
 | 4 | Exclude generated code from both views | build-script- and macro-generated code — which magma now *sees* because it executes build scripts | Go had 92 false rows from cgo `init` |
 | 5 | Refuse when there is no production root | Rust roots are richer than Go's `func main`: bin targets, lib `pub` API, examples, benches, via `cargo metadata` | Go's no-prod-main refusal exists because reachability was ~91% false positives without it |
 
-Requirement 2 carries a known risk: `CallHierarchyConfig { exclude_tests }` looked like a free win,
-but the spike could not validate it — `cfg(test)` is off by default, so no test functions existed
-in the graph and the flag was **inert**. The prod/test split is **unproven** and must be
-established before parity can be claimed.
+### Requirement 2 — RESOLVED, and not the way it first appeared
+
+`CallHierarchyConfig { exclude_tests }` looked like a free win. **It is not usable for this.**
+Verified twice:
+
+1. With `cfg(test)` off (rust-analyzer's default) no test functions exist in the graph at all, so
+   the flag is inert — `exclude_tests` true and false produced identical output.
+2. With `cfg(test)` enabled via `CargoConfig.cfg_overrides` (`CfgDiff::new(vec![CfgAtom::Flag(sym::test)], …)`),
+   the test function and its `t → only_test` edge appear — but the two modes are **still byte-identical**.
+
+Reading `call_hierarchy.rs` explains why: every `exclude_tests` check is on the **callee** side
+(`def.is_test(db)`), filtering test functions out of *results*. It never suppresses traversal
+*from* a test function that was explicitly queried. Since extraction enumerates every function,
+test callers' edges come back regardless.
+
+**The correct design mirrors Go exactly**, using primitives rust-analyzer does provide —
+`Function::is_test`, `is_main`, `is_bench`:
+
+- Enable `cfg(test)` so test code is in the graph at all.
+- Emit **one** graph: every function flagged test/main/bench, every edge.
+- magma computes reachability **twice** over that graph — from all roots, and from production
+  (non-test) roots only — exactly as the Go backend does.
+
+This is simpler than the flag, avoids depending on an upstream behaviour that does not match our
+need, and puts graph-walking in one place. Requirement 3's mechanism (`is_test`) falls out of the
+same primitive.
 
 ## Reachability views and the cross-check
 
@@ -150,13 +172,19 @@ Both are new *reasons* in magma's existing refusal machinery, not new mechanism.
 ## Contract
 
 Rust reuses the existing wire contracts unchanged, with one addition: a new **`fidelity`** token.
-Go emits `"rta"` (Rapid Type Analysis). Rust's edges come from rust-analyzer's HIR-level type
-inference and are a different thing, so they get their own token (proposed: `"hir"`).
+Go emits `"rta"` (Rapid Type Analysis). Rust's edges come from rust-analyzer's type inference,
+which is a different thing, so it gets its own token: **`"semantic"`**.
 
-**Coordination required:** the Architext side consumes `fidelity` and has a frozen
-`magma-code-graph/1` schema. Their validator accepts any non-empty string today, but a new token
-changes what their renderer must explain to users. Notify before shipping — the same handshake
-used for the emitter freeze.
+**Decided, not `"hir"`.** magma already strips fidelity jargon from its *human* output while
+keeping the field in JSON for machines — but Architext renders it to users. `"hir"` is
+rust-analyzer's internal vocabulary and means nothing to a reader; `"semantic"` describes what the
+edges actually are. Consumers should render both tokens as human phrases rather than raw strings
+(`"semantic"` → "resolved by type inference"; `"rta"` → "includes approximated dynamic calls").
+
+**Coordination required:** the Architext side consumes `fidelity` against a frozen
+`magma-code-graph/1` schema. Their validator accepts any non-empty string today, so this is
+additive — but it changes what their renderer must explain. Notify before shipping, using the same
+handshake as the emitter freeze.
 
 Everything else is identical: `pkg` becomes the crate/module path, `kind` stays `func`/`method`,
 `signature` renders module-relative type strings. **Rust must be indistinguishable from Go to
