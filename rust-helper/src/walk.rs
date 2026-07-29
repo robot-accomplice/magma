@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 
-use ra_ap_hir::{HasSource, PathResolution, Semantics};
+use ra_ap_hir::{
+    AsAssocItem, AssocItem, AssocItemContainer, HasSource, Impl, PathResolution, Semantics,
+};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_paths::AbsPath;
 use ra_ap_syntax::{ast, AstNode, SyntaxNode};
@@ -98,8 +100,28 @@ fn walk(
         }
         if let Some(mcall) = ast::MethodCallExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_method_call(&mcall) {
-                // Task 6 refines dynamic detection for `dyn Trait` receivers.
-                out.push(site(sema, &n, f, false, db, vfs, root));
+                match f.as_assoc_item(db).map(|assoc| assoc.container(db)) {
+                    Some(AssocItemContainer::Trait(t)) => {
+                        // `dyn Trait` receiver: resolve_method_call gives back the
+                        // trait's own declared function, which is never enumerated
+                        // (no node in `index`), so a direct edge would silently
+                        // vanish and invent dead code for every impl. Over-approximate
+                        // instead, mirroring Go's RTA: emit one dynamic edge to every
+                        // impl of this trait method in the workspace. Extra edges
+                        // under-report dead code (safe); missing edges invent it.
+                        let name = f.name(db);
+                        for imp in Impl::all_for_trait(db, t) {
+                            for item in imp.items(db) {
+                                if let AssocItem::Function(impl_fn) = item {
+                                    if impl_fn.name(db) == name {
+                                        out.push(site(sema, &n, impl_fn, true, db, vfs, root));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => out.push(site(sema, &n, f, false, db, vfs, root)),
+                }
             }
         }
     }
