@@ -106,3 +106,30 @@ mod hidden_trait {
         fn hid_m(&self) {}
     }
 }
+
+/// Trait-impl case 4: self type is a builtin (`i32`), not an `Adt` — the
+/// orphan rule means this shape can ONLY occur in a trait impl, never an
+/// inherent one, which is exactly why `is_public_method`'s `as_adt()`
+/// requirement must not gate trait impls at all. Everything here is public
+/// at the top level, so rustc's dead_code lint is silent; `m2` must be
+/// root:true.
+pub trait Tr2 {
+    fn m2(&self);
+}
+impl Tr2 for i32 {
+    fn m2(&self) {}
+}
+
+/// Trait-impl case 5: identical shape to case 4 (builtin self type), but the
+/// trait itself is private and never re-exported — nothing external can name
+/// `PrivTr` or reach `priv_m` through it. rustc flags the whole cluster
+/// (`PrivTr` never used), so `priv_m` must be root:false regardless of the
+/// self type's shape.
+mod hidden_prim_trait {
+    trait PrivTr {
+        fn priv_m(&self);
+    }
+    impl PrivTr for i32 {
+        fn priv_m(&self) {}
+    }
+}
