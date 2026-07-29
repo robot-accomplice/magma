@@ -1181,3 +1181,41 @@ attempted against the unexpanded token rather than the expanded one. Grep the ve
 Verification: the fixture must emit an edge to `foo` from a function containing
 `println!("{}", foo())`, and `foo` must not be reported dead. Existing fixtures unchanged
 (`fixture` 11 fns / 8 calls, `multi_impl`, `libonly`), and the oracle harness must stay FATAL=0.
+
+### Task 13: Make the harness's cascade exclusion collision-proof
+
+**Found during Task 9's re-review; pre-existing, and a defect in the measuring instrument
+itself.** The shipped impl-cascade exclusion keys on the **bare trait/type name** captured from
+rustc's diagnostic text (`oracle-diff.sh:158,163`). Names are not unique within a crate.
+
+Demonstrated with a probe containing both a dead `Amb` and a live `Amb`:
+
+```
+line 2: trait `Amb` is never used          <- dead_side::Amb
+line 9: method `never_used` is never used  <- live_side::Amb (rustc spoke per-method)
+```
+
+A name-keyed gate treats `dead_traits = ["Amb"]` as covering **`live_side::Amb`'s methods too** —
+including ones rustc considers live. That is the same divergence-hiding slot Task 9's reverted
+exclusion occupied; the shipped impl version is only narrowed by requiring trait *and* type to
+collide together, which makes it rarer, not sound.
+
+**The sound gate:** the `(file, line)` of the enclosing trait/impl declaration, matched against
+the primary span of the `... is never used` diagnostic. rustc supplies both, and they cannot
+collide.
+
+**Cheapest correct route — and it deletes code rather than adding it.** The harness currently
+cannot build that key because `helper.json` carries only `kind: "func"|"method"` with no
+container. Have `enumerate.rs` emit the enclosing container's `(file, line)` as a field: it
+already holds `db` and the `ra_ap_hir::Function`, and `as_assoc_item(db).container(db)` plus
+`HasSource` yields it directly. With that field present the harness can drop its source-scanning
+brace matcher entirely — removing both the brace-matching hazard and its O(methods × filesize)
+subprocess cost.
+
+**Files:** `rust-helper/src/enumerate.rs`, `rust-helper/src/model.rs`,
+`rust-helper/scripts/oracle-diff.sh`, `rust-helper/scripts/oracle-diff.jq`.
+
+Verification: the dead-`Amb`/live-`Amb` probe must NOT exclude `live_side::Amb`'s methods; the
+existing cascade behaviour on `libonly` must be unchanged; all fixtures keep their current
+FATAL counts (`libonly`'s one honest FATAL may legitimately become excluded once the gate is
+sound — if so, say which and why).
