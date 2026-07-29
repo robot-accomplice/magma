@@ -180,17 +180,45 @@ reason**, not "run degraded." A run with build scripts skipped produces false de
 exact failure this bar exists to prevent. Degraded output would violate both full-parity and
 honest-refusal principles. Flagged for explicit confirmation.
 
-## 7. Unvalidated — carry into the spec as risks
+## 7. Throughput — MEASURED (release build): 43s on a 575k-line workspace
 
-- **Throughput at scale: NEVER MEASURED.** Two attempts on roboticus-rust (575k lines) were lost
-  to session teardown; only a 10-function fixture ever completed. Per-function resolution across
-  a ~17k-function workspace is unknown and could be architecturally significant. For reference,
-  Go maps roboticus (17,561 nodes) in ~15s; if Rust takes tens of minutes, that materially
-  changes the "near-free to run before every task" value proposition.
+Target: roboticus-rust, 1,288 `.rs` files / 575k lines, workspace, no toolchain pin.
+
+| phase | release | debug | note |
+|---|---|---|---|
+| `load_workspace` | **2.2s** | 19.2s | build scripts cached from a prior run |
+| enumerate | **11.8s** | 206.4s | 3,289 workspace-local functions |
+| edges (`outgoing_calls`) | **29.4s** | 484.7s | 4,515 edges |
+| **total** | **43.4s** | 710.3s | **release is 16.4× faster** |
+| binary | **22 MB** | 121 MB | release is the shipped artifact |
+
+**Build the helper in release mode. This is not a tuning detail — it is the difference between a
+viable design and an unusable one.** A debug build measured 11.8 minutes for the same work and
+its edge phase failed to complete at all on three earlier attempts.
+
+**The workspace-local filter is essential**: 118,081 functions unfiltered vs **3,289** filtered —
+97% of what rust-analyzer loads is dependency and std code. See §7a.
+
+Comparison with Go (different repos, both large real workspaces — indicative, not apples-to-apples):
+
+| | functions | edges | time | per function |
+|---|---|---|---|---|
+| Go (roboticus) | 17,561 | 49,820 | ~15s | ~0.85ms |
+| Rust (roboticus-rust) | 3,289 | 4,515 | 43.4s | ~13ms |
+
+Rust is ~15× slower per function, but **43s in absolute terms is acceptable** for a pre-audit
+step, and magma's freshness-skip makes re-runs at an unchanged SHA free. The "near-free to run
+before every task" premise survives.
+
+Caveat: the edge count (4,515) is from `outgoing_calls`, which §3 proves **misses macro-generated
+edges**. The `Semantics`-based replacement will produce more edges and has **not** been
+performance-tested. Its cost profile is unknown and must be re-measured during implementation.
+
+### Remaining unvalidated risks
 - **`cfg(test)` is not enabled by default**, so no test functions appeared in the graph at all,
   and `exclude_tests=true`/`false` produced **identical** output. The flag is currently inert and
   the prod/test split is **unproven**. Requires `CargoConfig.cfg_overrides`.
-- **Real shipped binary size** — unknown (see §2).
+- **Shipped binary size: MEASURED** — 22 MB release (121 MB debug). Materially larger than magma's current pure-Go binary, and must be cross-compiled per target platform.
 - **`ra_ap_*` API churn** — all crates at `0.0.343` with no stability guarantee. Operator decision:
   **accepted**; pin the version and update deliberately, because every alternative (nightly `-Z`
   interfaces, user-installed analyzers, a hand-rolled front end) is less secure and less
