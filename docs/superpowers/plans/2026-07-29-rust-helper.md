@@ -1299,3 +1299,35 @@ no-execution mode is added.
 **Verification:** every fixture's JSON carries `"executed_target_code": true`; a refusal artifact
 (private-items-only crate) carries `false`; no other field changes; all fixtures keep their
 current function/edge counts and FATAL status.
+
+### Task 16: Expected-FATAL baselines, so the harness can gate
+
+**Proposed during Task 13's review; it answers a problem raised two tasks earlier and left open.**
+
+Two fixtures (`libonly`, `collision`) now exit non-zero **by design**, carrying FATALs that are
+honest and adjudicated. That is the correct outcome — suppressing them is the mistake this plan
+has already had to undo twice — but it breaks the harness as a gate: a run that is red for
+adjudicated reasons is indistinguishable from one red for a **new** reason, so the exit code stops
+carrying information and gets ignored. No CI workflow invokes `oracle-diff.sh` today, and it
+cannot be wired up while red is the normal state.
+
+**The fix: make "known and adjudicated" machine-checkable instead of prose.**
+
+- Commit a per-fixture baseline, e.g. `testdata/<crate>/oracle-expected.json`, listing each
+  adjudicated FATAL by `symbol` + `file:line` with a one-line reason (`Task-9 trait-declaration
+  gap`; `rustc attributes the unused-method diagnostic to the trait's method decl`).
+- Have the harness — or a thin runner around it — diff the observed FATAL set against the baseline
+  and exit **0 on exact match**, non-zero on **any** difference.
+- **A disappearing FATAL must also fail.** That is the non-obvious half: a FATAL vanishing usually
+  means an exclusion silently widened, which is exactly the failure mode this plan keeps hitting.
+  An expected-set diff catches it; a threshold or a max-count would not.
+
+Then `exit 0` means *"the instrument behaves as adjudicated"* rather than *"no FATALs"*, every red
+run is real signal, and the fixtures become CI-able.
+
+**Files:** `rust-helper/scripts/oracle-diff.sh` (or a new runner), `rust-helper/testdata/*/oracle-expected.json`, plus a CI workflow entry.
+
+Verification: with baselines committed, all fixtures exit 0. Introduce a deliberate regression
+(e.g. revert one line of a helper fix) and confirm it exits non-zero naming the new FATAL. Delete
+a baseline entry the helper still produces and confirm that also fails. Both directions must fail
+loudly, and adding a baseline entry must require a stated reason.
