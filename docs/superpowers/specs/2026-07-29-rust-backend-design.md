@@ -462,3 +462,28 @@ meets a five-minute Rust run will reasonably assume something has hung.
 This is a **product-surface** requirement, not just a doc note: the CLI already prints a progress
 panel, and for Rust it should make the expensive phases legible (sysroot load, workspace load,
 enumeration, edges) so a long run reads as working rather than stuck.
+
+## DECIDED: the artifact records that code was executed
+
+Resolving the open question above (operator, 2026-07-29): **add the field.**
+
+`magma-code-graph/1` gains one boolean:
+
+```jsonc
+"executed_target_code": true    // this map was produced by running the analysed repo's code
+```
+
+- **Rust, computable** → `true`. Build scripts and proc macros ran; that is required for
+  correctness and cannot be gated away (§Gates).
+- **Go** → `false`. Go analysis type-checks and builds IR; it never executes target code.
+- **Any refusal** → `false`. Consent was declined or the analysis never ran, so nothing executed.
+
+Rationale for carrying a technically-derivable field: it is security-relevant, and "derivable if
+you know the rule" is the wrong property for a trust boundary. It also stops being derivable the
+moment sandboxed execution lands (a Non-goal here, deferred not cancelled) — at that point
+`language == "rust"` would no longer imply *unsandboxed* execution, and a consumer reading the
+field would still be correct where one applying the rule would not.
+
+The helper emits the same fact in `magma-rust-helper/1` so magma's Go side passes it through
+rather than re-deriving it. Additive to Architext's schema, which accepts unknown fields; notify
+them alongside `fidelity: "semantic"` before either ships.
