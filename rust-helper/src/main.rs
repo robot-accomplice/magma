@@ -39,6 +39,13 @@ fn main() -> anyhow::Result<()> {
         num_worker_threads: 4,
         proc_macro_processes: 1,
     };
+    // Whether loading the workspace ran the repo's own code: build scripts
+    // executed and a proc-macro server expanded macros. Derived from the
+    // config actually passed to load_workspace_at, not hard-coded, so it
+    // stays honest if a sandboxed or no-execution mode is ever added.
+    let executed_target_code = load_config.load_out_dirs_from_check
+        && load_config.with_proc_macro_server != ProcMacroServerChoice::None;
+
     let (db, vfs, _p) =
         load_workspace_at(Path::new(&root), &cargo_config, &load_config, &|_s| {})?;
     eprintln!("TIMING load_workspace: {:.1}s", t0.elapsed().as_secs_f64());
@@ -110,7 +117,7 @@ fn main() -> anyhow::Result<()> {
 
     if !use_outgoing {
         let functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
-        let out = model::Output::new(functions, calls);
+        let out = model::Output::new(executed_target_code, functions, calls);
         println!("{}", serde_json::to_string_pretty(&out)?);
     }
     Ok(())
