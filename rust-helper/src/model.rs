@@ -44,9 +44,12 @@ pub struct Function {
     /// Repo-relative path.
     pub file: String,
     pub line: u32,
-    /// 1-based UTF-8 byte column of the function's own name token, matching
-    /// rustc's `column_start` convention in its JSON diagnostics (verified
-    /// directly: a `trait \`DeadTr\` is never used` diagnostic for `pub trait
+    /// 1-based **character** column of the function's own name token, matching
+    /// rustc's `column_start` convention in its JSON diagnostics. Note this is a
+    /// character count (Unicode scalar values, via `WideEncoding::Utf32`), NOT
+    /// ra_ap's native UTF-8 byte offset — the two diverge on any line containing
+    /// multi-byte text, and rustc counts characters. See `enumerate::char_line_col`.
+    /// (verified directly: a `trait \`DeadTr\` is never used` diagnostic for `pub trait
     /// DeadTr` at 4-space indent reports `column_start: 15` — 4 spaces + the
     /// 10-char `"pub trait "` prefix + 1 for 1-based = 15). Exists so the
     /// oracle-diff harness can key a dead_code diagnostic's primary span
