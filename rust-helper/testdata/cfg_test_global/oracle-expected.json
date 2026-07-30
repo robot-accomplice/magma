@@ -1,0 +1,22 @@
+{
+  "adjudication": "open-defect-awaiting-phase-b-fix",
+  "fatal": [
+    {
+      "symbol": "clock_helper",
+      "pkg": "cfg_test_global",
+      "file": "src/lib.rs",
+      "line": 33,
+      "column": 4,
+      "status": "open-defect",
+      "reason": "OPEN DEFECT (Plan A outcome, Family E) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. main.rs forces cfg(test) on globally for the whole workspace load (cfg_overrides.global), so `#[cfg(not(test))] pub fn real_clock()` -- clock_helper's only caller -- is not merely misclassified, it never exists as a node at all (verified: the enumerated function list for this crate is exactly {clock_helper, other_root, tests::uses_it}; real_clock is entirely absent). With no incoming edge and no root, clock_helper reads dead. A plain `cargo check` (no cfg(test) forcing) compiles real_clock as public API and emits no dead_code warning for either function. NOTE on this fixture's shape: `tests::uses_it` (excluded from the comparison itself via the harness's own test:true normalisation) exists only so clock_helper stays genuinely live in BOTH of oracle-diff.sh's `--all-targets` compilations; without it, the harness's own cfg(test)-enabled `--all-targets` compilation unit coincidentally ALSO cannot see real_clock and independently reports clock_helper dead in that build, which makes the divergence disappear by accident (both sides agree \"dead\", FATAL:0) rather than exposing it -- confirmed directly: the same fixture without tests::uses_it produces FATAL:0 through this harness even though real_clock is still completely absent from the node list. Fix tracked for Phase B (the plan's own remedy is a second, cfg(test)-off workspace load, mirroring Go's two-load architecture); not suppressed or excluded here."
+    }
+  ],
+  "summary": {
+    "considered": 2,
+    "excluded": 1,
+    "agree_dead": 0,
+    "agree_live": 1,
+    "fatal": 1
+  },
+  "executed_target_code": true
+}
