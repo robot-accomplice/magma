@@ -1364,3 +1364,110 @@ before writing a conversion by hand.
 Verification: `p_utf8b` must have the helper and rustc columns agree, and the function must match
 the oracle instead of surfacing as a FATAL. All existing fixtures (ASCII-only) must be unchanged —
 `collision` 3/1, `libonly` 2/3, and `fixture`/`multi_impl`/`traitdecl`/`buildgen` at 0.
+
+---
+
+# Plan A outcome: DO NOT SHIP. Extraction is unsound on ordinary Rust.
+
+**Recorded 2026-07-30 at `755e0b1`, after the final whole-branch review (three reviewers,
+three lenses). Tasks 1–17 are all complete and the branch's own oracle gate is GREEN — and that
+green is the problem: no fixture exercises the shapes below, so the instrument never saw them.**
+
+The helper does not meet the stated bar ("full parity or don't ship"). This is not a polish gap.
+On a **twelve-line idiomatic program** the helper emits 5 functions and **zero** edges, so magma
+would report 4 dead where rustc reports 1 — three false dead-code rows:
+
+```rust
+fn double(x: i32) -> i32 { x * 2 }          // passed to .map()      -> FALSE DEAD
+fn handler_a() -> i32 { 1 }                  // in a static fn table  -> FALSE DEAD
+const fn init_b_const() -> i32 { 9 }         // called from a static  -> FALSE DEAD
+fn really_dead() -> i32 { 0 }                // genuinely dead        -> correct
+static TABLE: [fn() -> i32; 1] = [handler_a];
+static S: i32 = init_b_const();
+fn main() { vec![1,2,3].into_iter().map(double).collect::<Vec<_>>(); }
+```
+
+A false dead-code row is the worst failure this tool has: it is a deletion order for live code.
+**Containment is the only reason this is not an incident** — verified independently: only
+`detect.Go` is registered (`internal/backend/backend.go`), nothing `exec`s the helper, and a real
+Rust repo still refuses honestly. Nothing consumes any of this yet.
+
+## Confirmed false-dead-code families (each reproduced against rustc, not argued)
+
+| # | Family | Cause | Trigger frequency |
+|---|---|---|---|
+| A | Function used as a **value** — `.map(f)`, `[f]`, `let g = f;`, struct field | `walk.rs:94` casts only `CallExpr` with a `PathExpr` callee | Every higher-order call site |
+| B | **Desugared** calls — `a + b`, `for`, `?`, `await`, `println!("{}", x)`, `Drop` | `walk.rs:88-141` models no desugaring, so operator/format/iterator trait impls get no incoming edge | Universal |
+| C | Calls **outside a function body** — `const`/`static`/assoc-const initializers | `walk.rs:38-50` walks only `f.source(db).value.body()` | Common |
+| D | **Macro depth-8 guard** silently truncates | `walk.rs:85` `if depth > 8 { return; }`, no counter, no disclosure | `serde_json::json!` exhausts it at the **2nd key**; `println!` alone costs 2 |
+| E | **`cfg(test)` forced globally**, so `#[cfg(not(test))]` code is invisible and its callees read dead | `main.rs:31-34`; Go does **two** package loads precisely to avoid this | Any cfg-split codebase |
+| F | Nodes emitted **inside the user's rustup toolchain** | `#[derive(Debug)]` expansion attributed to `core/src/fmt/mod.rs`; `generated:false` | `#[derive(Debug)]` is near-universal |
+
+## Confirmed contract defects (independent of the above)
+
+- **`executed_target_code` is false on its only reachable refusal path.** `load_workspace_at`
+  (`main.rs:49`) runs build scripts and the proc-macro server; the refusal fires at `main.rs:77`
+  and `Refusal::new` hard-codes `false`. The one field whose purpose is to be a trust boundary
+  currently lies. *(Ledger correction: Task 15 recorded hard-coded-`false` as a safety property —
+  "cannot accidentally carry true". That reading was wrong; it is simply incorrect.)*
+- **Two refusal paths emit no machine-readable refusal at all** — `.expect` panics (exit 101),
+  `load_workspace_at(..)?` exits 1. Go guarantees a `computable:false` envelope on every soft
+  refusal. Exit-code convention is also inverted vs Go.
+- **`test` is the `#[test]` attribute only**, so helpers in `#[cfg(test)] mod` and in `tests/`
+  report `test:false`. Worse, `roots.rs:55-58` only exempts `node.test`, so a `#[cfg(test)] pub mod`
+  becomes a **production root** — laundering test code into production and *hiding* real dead code.
+  Go's analogue is the `_test.go` filename, which covers every helper in a test file.
+- **`generated` is `is_macro_origin || path.contains("/target/") || path.contains("/build/")`** —
+  an unanchored substring match. `src/build/mod.rs` and any hand-written `macro_rules!` function are
+  marked generated, and `IsDead()` excludes generated, so this **silently suppresses dead rows**.
+  *(Ledger correction: the deferral note claiming `/build/` "is a subset of `/target/`, adds no
+  coverage" is false — `src/build/mod.rs` matches `/build/` only.)*
+- **Edge `kind:"dynamic"` is CHA in Rust, RTA in Go.** `Impl::all_for_trait` emits an edge to every
+  impl of a trait regardless of instantiation. Same field, same string, materially weaker analysis.
+- **`symbol` is bare, and `(pkg, symbol)` is not unique** — `libonly` ids 14/15 are both
+  `re_m`/`libonly::reexported_trait`. Go's `symbol` carries the receiver type (`T.Method`) precisely
+  to avoid this; Architext slugs would collide into positional `-2`/`-3` suffixes.
+
+## The trap to avoid when fixing family B
+
+Trait impls of non-local traits (`Display`, `Iterator`, `Add`) survive today **only by accident**:
+`roots.rs:184-196` marks them roots when the trait name happens to be `use`d into a publicly
+reachable module. Root status therefore depends on where an unrelated import sits — verified:
+moving `use std::fmt;` from the crate root into a private `error.rs` flips
+`impl fmt::Display for MyErr` to false-dead.
+
+The tempting fix — "treat impls of non-local traits as roots" — turns probe5 green while making
+**every trait impl a permanent root**, so a dead trait impl could never be reported again, and it
+leaves family B's real hole (no desugared edges) both open and untestable. **The fix must be at the
+edge layer in `walk.rs`**: resolve `BinExpr`/`PrefixExpr`/`IndexExpr` → `ops::*`, `ForExpr` →
+`IntoIterator::into_iter`/`Iterator::next`, `TryExpr` → `From::from`, `AwaitExpr` → `Future::poll`,
+format args → `Display::fmt`/`Debug::fmt`, scope exit → `Drop::drop`. Only then can roots be
+tightened to recover reporting power.
+
+## Why the gate stayed green, and what that means for the harness
+
+The harness is **sound and honest** — both reviewers who attacked it agree, and it caught every
+one of these defects the moment it was given the right input. It refused rather than reporting a
+false green on a warm cache. The failure is **fixture coverage, not instrumentation**: no
+`testdata/` crate contains a function used as a value, a desugared operator call, a const
+initializer, a deep macro, a `cfg(not(test))` item, or a `derive`. Verified: zero fixtures match.
+
+**Therefore the first task of the next phase is fixtures, not fixes.** Add a crate per family
+above, confirm each turns the gate RED with a FATAL that matches the family, and only then fix.
+Otherwise the same green will be re-earned without the defect being gone. This is the pattern that
+already burned this plan three times, at a larger scale.
+
+## Sequencing
+
+1. **Fixtures first** — one crate per family A–F; gate must go RED with the expected FATAL set.
+2. Contract defects (cheap, independent): refusal honesty, refusal envelopes, `test`/`root`,
+   `generated`, `symbol` uniqueness.
+3. Family E (two loads) — matches Go's architecture; roughly doubles a run already at 130–270s
+   on a large workspace. Measure before and after; do not guess.
+4. Families A, C, F — mechanical once located.
+5. Family B (desugaring) — the deepest, and the one that unblocks tightening roots.
+6. Re-baseline `oracle-expected.json` per fixture only after each family is genuinely fixed.
+
+**Do not wire a magma-side Rust backend, and do not change
+`~/.claude/skills/magma/SKILL.md`'s "Rust is in development" line, until A–F are closed.** That
+line is currently accurate and is the thing protecting users.
