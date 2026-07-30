@@ -1,8 +1,9 @@
 //! Workspace-local function discovery with full node metadata.
 
+use ra_ap_cfg::{CfgAtom, CfgExpr};
 use ra_ap_hir::{
     AsAssocItem, AssocItem, AssocItemContainer, Crate, DisplayTarget, HasAttrs, HasSource,
-    HasVisibility, HirDisplay, InFile, ModuleDef, Semantics, Visibility,
+    HasVisibility, HirDisplay, HirFileId, InFile, MacroKind, ModuleDef, Semantics, Visibility,
 };
 use ra_ap_ide_db::base_db::CrateOrigin;
 use ra_ap_ide_db::line_index::{TextSize, WideEncoding};
@@ -79,6 +80,147 @@ fn char_line_col(db: &RootDatabase, file_id: FileId, offset: TextSize) -> (u32, 
     (line_col.line, wide.col)
 }
 
+/// True when `file_id`'s macro kind implies the expanded content has no
+/// direct user-authored counterpart in real source — the safe direction to
+/// keep force-marking `generated` (see the "fail toward live" rule: over-
+/// excluding a borderline case only risks *hiding* a dead row, never
+/// inventing a false one). False for `file_id` that isn't a macro expansion
+/// at all, and for the two kinds a `Function`'s own name/signature tokens
+/// demonstrably survive macro expansion with their real span intact,
+/// resolving `original_range` back to the user's own file (verified with
+/// probe crates, not inferred):
+///   - `MacroKind::Declarative` (`macro_rules!`, including Macros 2.0) — an
+///     item-position invocation like `make_fn!(foo);` puts the real
+///     identifier `foo` in the user's own call-site tokens; that identifier
+///     is what becomes the generated function's name, carrying its call-site
+///     span through expansion.
+///   - `MacroKind::Attr` (a procedural attribute macro, e.g.
+///     `#[tracing::instrument]`) decorates an already fully user-written
+///     function — well-behaved attribute macros re-quote the original input
+///     tokens rather than minting new ones, so the name/signature spans
+///     point at the real declaration.
+///
+/// Every other kind stays `true`: `MacroKind::Derive`/`DeriveBuiltIn`
+/// (`#[derive(Debug)]` etc.) synthesize an entire method body — including
+/// its name token — with no corresponding `fn` a human ever wrote, so there
+/// is no real declaration to NOT exclude. `DeclarativeBuiltIn` (built-in
+/// function-like macros, chiefly `include!`) and `ProcMacro` (function-like
+/// proc-macros) are left conservatively excluded too — the `target_dir`
+/// anchor already independently classifies the common real-generated case
+/// (`include!(concat!(env!("OUT_DIR"), ..)))`) correctly regardless, and
+/// neither kind was named as an over-reach case to fix.
+fn is_macro_kind_synthetic(db: &RootDatabase, file_id: HirFileId) -> bool {
+    match file_id.macro_file() {
+        None => false,
+        Some(mc) => !matches!(mc.kind(db), MacroKind::Declarative | MacroKind::Attr),
+    }
+}
+
+/// True when a `#[cfg(..)]` predicate positively, unconditionally requires
+/// `test` — `#[cfg(test)]` itself, or `test` as one conjunct of an `all(..)`
+/// (every conjunct must hold, so requiring `test` anywhere in the list means
+/// the whole item requires it). Deliberately does NOT fire through `not(..)`
+/// (`#[cfg(not(test))]` means the opposite — production-only — code, the
+/// Family E concern, unrelated to this) or through a partial `any(..)`
+/// (`#[cfg(any(test, feature = "x"))]` can still compile without `test`, so
+/// it does not unconditionally require it). See `is_test_context` for why
+/// this asymmetry (only fire on a genuinely unconditional requirement)
+/// matters: a false positive here is the dangerous direction for this field.
+fn cfg_requires_test(expr: &CfgExpr) -> bool {
+    match expr {
+        CfgExpr::Atom(CfgAtom::Flag(f)) => f.as_str() == "test",
+        CfgExpr::All(exprs) => exprs.iter().any(cfg_requires_test),
+        CfgExpr::Any(exprs) => !exprs.is_empty() && exprs.iter().all(cfg_requires_test),
+        CfgExpr::Atom(CfgAtom::KeyValue { .. }) | CfgExpr::Not(_) | CfgExpr::Invalid => false,
+    }
+}
+
+/// True when `file` (repo-relative) sits under a Cargo integration-test or
+/// bench target directory — `tests/` or `benches/`, per Cargo's own target
+/// discovery convention. A structural fact, not a heuristic: every file
+/// Cargo discovers this way compiles ONLY into a test/bench binary, never
+/// into the library or a `bin` target, regardless of any attribute on the
+/// functions inside it (which is exactly why `Function::is_test` alone,
+/// keyed on the `#[test]` attribute, never sees these at all — an ordinary
+/// helper in `tests/foo.rs` carries no `#[test]`/`#[cfg(test)]` of its own).
+/// Path-component match, not a substring match, so a module legitimately
+/// named `testsuite` or a path segment like `latest/` is not caught by
+/// accident.
+fn in_test_or_bench_target(file: &str) -> bool {
+    std::path::Path::new(file)
+        .components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some("tests") | Some("benches")))
+}
+
+/// True when `f` is genuinely test-only — unreachable and uncallable in a
+/// production (non-test) build. `Function::is_test` alone (the `#[test]`
+/// attribute) covers only the harness entry point itself, not: a helper
+/// inside `#[cfg(test)] mod tests { .. }` (checked here via cfg ancestry —
+/// the function's own cfg, or any ancestor module's, up to the crate root),
+/// nor anything in a `tests/`/`benches/` integration target (checked via
+/// `in_test_or_bench_target`).
+///
+/// Direction: `roots::mark` treats `test:true` as NEVER a production root,
+/// so a false POSITIVE here (marking real production code test-only) risks
+/// hiding it from production reachability and reporting code reachable only
+/// through it as false-dead — the dangerous direction for this field. A
+/// false NEGATIVE reproduces defect 3 itself (a test helper laundered into a
+/// production root, which then hides everything genuinely dead beneath it).
+/// Both directions carry real risk, which is why every signal here is a
+/// structural fact Cargo/rustc itself enforces (a directory Cargo's own
+/// target discovery uses, a `#[test]`/`#[cfg(test)]` attribute actually
+/// present, `cfg_requires_test`'s unconditional-only match) rather than a
+/// probabilistic guess.
+fn is_test_context(db: &RootDatabase, f: ra_ap_hir::Function, file: &str) -> bool {
+    f.is_test(db)
+        || in_test_or_bench_target(file)
+        || f.attrs(db).cfgs(db).is_some_and(cfg_requires_test)
+        || f.module(db)
+            .path_to_root(db)
+            .into_iter()
+            .any(|m| m.attrs(db).cfgs(db).is_some_and(cfg_requires_test))
+}
+
+/// A function's `symbol`, qualified enough that `(pkg, symbol)` is unique —
+/// bare `f.name(db)` is not: `testdata/libonly` has both a trait
+/// declaration's own method (`trait ReTr { fn re_m(&self); }`) and that
+/// trait's impl method (`impl ReTr for ReS { fn re_m(&self) {} }`) in the
+/// same module, both named `re_m`, giving two distinct nodes the identical
+/// `symbol="re_m", pkg="libonly::reexported_trait"` pair — Architext's node
+/// id is `slug(pkg + "-" + symbol)` with positional `-2`/`-3` collision
+/// suffixes, so an unrelated edit elsewhere in the file can silently renumber
+/// which node owns which id. Mirrors Go's `T.Method` receiver-qualification,
+/// generalised to Rust's three assoc-item shapes:
+///   - a free function or an assoc item with no container (never happens,
+///     just the fallback): bare name, unchanged — Go's bare function names
+///     have the same shape and the same uniqueness argument.
+///   - a trait DECLARATION's own method: `"{Trait}::{name}"` — there is no
+///     self type to qualify with (`fn re_m` inside `trait ReTr { .. }` names
+///     no `Self`), so the trait itself is the only available qualifier, and
+///     it is exactly what's needed to distinguish this from the impl below.
+///   - an INHERENT impl method: `"{SelfType}::{name}"` — direct analogue of
+///     Go's `T.Method`.
+///   - a TRAIT impl method: `"<{SelfType} as {Trait}>::{name}"` — Rust's own
+///     fully-qualified syntax, deliberately more than just `{SelfType}::
+///     {name}` because one self type can implement multiple traits sharing a
+///     method name (`Display::fmt` and `Debug::fmt` on the same struct are
+///     both `fmt`); the self-type-only form would silently reintroduce the
+///     exact collision this fix exists to close.
+fn qualified_symbol(db: &RootDatabase, f: ra_ap_hir::Function, display_target: DisplayTarget) -> String {
+    let name = f.name(db).as_str().to_owned();
+    let Some(assoc) = f.as_assoc_item(db) else { return name };
+    match assoc.container(db) {
+        AssocItemContainer::Trait(tr) => format!("{}::{name}", tr.name(db).as_str()),
+        AssocItemContainer::Impl(imp) => {
+            let self_ty = imp.self_ty(db).display(db, display_target).to_string();
+            match imp.trait_(db) {
+                Some(tr) => format!("<{self_ty} as {}>::{name}", tr.name(db).as_str()),
+                None => format!("{self_ty}::{name}"),
+            }
+        }
+    }
+}
+
 fn push(
     db: &RootDatabase,
     sema: &Semantics<'_, RootDatabase>,
@@ -103,7 +245,6 @@ fn push(
     // this resolves via real span maps to the actual generated file and
     // position; for other macro-item shapes it falls back to the macro call
     // site — either way a human-navigable location, never a synthetic one.
-    let is_macro_origin = src.file_id.is_macro();
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
@@ -137,19 +278,25 @@ fn push(
     let results =
         if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
     let doc = f.hir_docs(db).map(|d| first_sentence(d.docs()));
+    // Defect 3 fix: `f.is_test(db)` alone only sees the `#[test]` attribute —
+    // see `is_test_context`'s doc comment for what that misses and why.
+    // Computed before `file` is moved into the struct literal below.
+    let test = is_test_context(db, f, &file);
 
     let id = out.len() as u32;
     out.push((
         model::Function {
             id,
-            symbol: f.name(db).as_str().to_owned(),
+            // Defect 5 fix: `f.name(db)` alone is not unique within (pkg,
+            // symbol) — see `qualified_symbol`'s doc comment.
+            symbol: qualified_symbol(db, f, display_target),
             pkg: module_path(db, f),
             file,
             line: line + 1, // line_index is 0-based; magma reports 1-based
             column: column + 1, // same: line_index col is 0-based, rustc's is 1-based
             kind: if f.self_param(db).is_some() { "method" } else { "func" }.to_owned(),
             exported: f.visibility(db) == Visibility::Public,
-            test: f.is_test(db),
+            test,
             root: false,   // Task 5
             bench: f.is_bench(db),
             // H1 fix: anchored to the workspace's OWN target directory
@@ -162,7 +309,21 @@ fn push(
             // crate as generated and, downstream, excluding all of them from
             // the oracle comparison (see oracle-diff.sh's H1 refusal for what
             // catches the case this heuristic itself can't).
-            generated: is_macro_origin
+            //
+            // Defect 4 fix: `is_macro_origin` alone used to force `generated:
+            // true` for EVERY macro-expanded item, which over-reaches — a
+            // `macro_rules!` invocation in the user's own hand-written source
+            // (e.g. `make_fn!(foo);`) and a proc-macro attribute like
+            // `#[tracing::instrument]` decorating a fully user-written
+            // function both resolve, via `original_range` above, back to the
+            // user's own real source file, never under `target_dir`. Forcing
+            // them generated regardless hid genuinely dead, hand-written code
+            // from every dead-code view. `is_macro_kind_synthetic` narrows
+            // this to macro kinds whose expanded content has no real,
+            // user-authored counterpart to point at (a derive-synthesized
+            // method body, for instance) — see its doc comment for exactly
+            // which kinds are excluded and why each one is safe to exclude.
+            generated: is_macro_kind_synthetic(db, src.file_id)
                 || vfs
                     .file_path(file_id)
                     .as_path()
