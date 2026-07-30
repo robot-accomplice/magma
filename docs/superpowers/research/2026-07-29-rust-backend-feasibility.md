@@ -416,3 +416,35 @@ Two things follow, and both are operator decisions rather than implementation de
 1. The "near-free to run before every task" value proposition needs restating for Rust, or
 2. The 80s sysroot load — the single largest new cost, and a fixed overhead independent of repo
    size — needs investigation (it may be cacheable across runs).
+
+### 9a. CORRECTION to §9 — the "80s sysroot load" was a misattribution
+
+§9 reported that the sysroot fix added **80.1s** to the load phase and concluded the sysroot load
+needed optimising. **That attribution was wrong**, and the error was mine: I observed the load phase
+go from 1.8s to 80.1s after the config change and attributed it to sysroot loading without isolating
+the cause — diagnosing from a symptom rather than from a controlled measurement.
+
+A controlled A/B (toggling only the sysroot setting, warm cache) puts the **isolated sysroot cost at
+0–6s**, not 78s. Direct re-measurement of the current code on roboticus-rust:
+
+| run | load | enumerate | edges | total |
+|---|---|---|---|---|
+| 1 | **2.0s** | 14.5s | 115.4s | 131.9s |
+| 2 | **2.7s** | 19.3s | 251.5s | 273.6s |
+
+Both runs: 10,651 functions / 20,268 edges — correctness unchanged.
+
+**What the 80.1s actually was:** cold-cache `cargo check` build-script recompilation, which the
+workspace load triggers via `load_out_dirs_from_check`. That is a one-time cost per cache state, not
+a per-run sysroot cost, and it would occur with or without the sysroot setting.
+
+**Where the real cost lives:** edge extraction (115–251s), which is genuine analysis work — the
++64% edges the sysroot fix made visible have to actually be resolved. That is the price of
+correctness, not overhead to be optimised away.
+
+**Second correction — the totals are noisy.** 131.9s vs 273.6s for byte-identical input on
+back-to-back runs is a 2.1× spread, caused by other builds competing for CPU on the same machine.
+§9's "312.5s" was a single sample presented as a figure. Any future performance claim here needs
+repeated runs on an otherwise-idle machine, or it is not a measurement.
+
+Task 14 accordingly shipped **no code change**: there was no 80s sysroot cost to reduce.
