@@ -91,9 +91,9 @@ pub fn edges<'db>(
 /// task and stays as the one and only place the traversal itself lives; only
 /// the small "which bodies do I start from, and how do the ids materialise"
 /// wrapper differs between a real function and a synthesized initializer.
-pub fn init_edges(
-    sema: &Semantics<'_, RootDatabase>,
-    db: &RootDatabase,
+pub fn init_edges<'db>(
+    sema: &Semantics<'db, RootDatabase>,
+    db: &'db RootDatabase,
     vfs: &Vfs,
     root: &AbsPath,
     inits: &[(model::Function, InitSource)],
@@ -142,12 +142,12 @@ pub fn init_edges(
     out
 }
 
-fn walk(
-    sema: &Semantics<'_, RootDatabase>,
+fn walk<'db>(
+    sema: &Semantics<'db, RootDatabase>,
     node: &SyntaxNode,
     out: &mut Vec<Site>,
     depth: usize,
-    db: &RootDatabase,
+    db: &'db RootDatabase,
     vfs: &Vfs,
     root: &AbsPath,
 ) {
