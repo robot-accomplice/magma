@@ -35,9 +35,25 @@ backend, do not wire it, and do not soften the "Rust is in development" language
 
 ---
 
-## Start here: fixtures, not fixes
+## Start here: repair the instrument, THEN fixtures, THEN fixes
 
 **This is the single most important instruction in this document.**
+
+**Step 0 — fix the oracle pipeline (H1–H8 in the plan doc).** Until it is fixed, no measurement
+this harness produces can be trusted, including "all 7 fixtures pass" and any before/after the next
+phase takes. Two critical false-green paths, both reproduced directly: there is **no guard on
+`considered == 0`** (an unmodified fixture copied to a path containing `/build/` compares zero
+functions and reports green, because `generated` is an unanchored substring match that excludes
+from *both* directions), and **`cargo check`'s exit status is discarded**, so a crate that fails to
+compile emits no `dead_code` diagnostics and every function is booked `agree_live`, exit 0.
+
+Note the distinction, because it matters when fixing: **the Task 16 gate is excellent** and
+survived all eight attacks made on it (set equality, symbol assertion, duplicate-key rejection,
+mandatory reasons, SUMMARY pinning). It is the **oracle pipeline feeding it** that is broken. Do
+not rewrite the gate.
+
+Also note that `generated`'s substring heuristic is a *single* root cause with two victims — it
+blinds the instrument (H1) and suppresses user-facing dead rows (contract defect). Fix it once.
 
 The gate is green today on a helper that is provably unsound. If the next session fixes defects
 first, it will re-earn that same green and have no way to tell whether anything actually improved.
@@ -101,11 +117,19 @@ tighten roots to recover reporting power.
 
 ## What is genuinely good and should not be rewritten
 
-- **The oracle harness.** Both reviewers who attacked it independently concluded it is sound and
-  honest. It caught every one of these defects the moment it was given the right input, and it
-  refuses rather than reporting a false green on a warm cache. The Task 16 gate does set-equality
-  against a committed baseline in **both** directions — a vanished FATAL fails too — pins the
-  SUMMARY counts, requires a written reason per baselined FATAL, and asserts `symbol` on key match.
+- **The Task 16 gate** (`oracle-gate.sh`/`.jq`) — set-equality against a committed baseline in
+  **both** directions (a vanished FATAL fails too), SUMMARY counts pinned, a mandatory written
+  reason per baselined FATAL, duplicate-key rejection, and `symbol` asserted on key match. It
+  survived 8/8 attacks including the two subtle ones (vanished FATAL; widened exclusion with the
+  FATAL set unchanged). **This is the best-built piece of the branch — do not rewrite it.** The
+  broken part is the oracle pipeline that feeds it, not the gate.
+- **The warm-cache refusal**, and the cascade exclusion's logic — the latter fires only when the
+  trait's own name token carries a `dead_code` diagnostic AND the self type is independently dead
+  or structurally ineligible, so it provably cannot hide a FATAL. All five baselined reasons
+  re-derive exactly against cold `cargo check` output.
+- **Determinism verified empirically** — three runs each on three fixtures, byte-identical. Since
+  Rust re-seeds `RandomState` per process, that is real evidence no `HashMap` iteration reaches
+  the output.
 - **`roots.rs` on lib crates.** Verified precise against rustc on an adversarial fixture: re-export
   bridges, private modules, nested `pub mod`, inherent vs trait impls all correct.
 - **The extractor/deriver boundary.** `Output` has no reachability field and `Refusal` has no

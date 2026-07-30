@@ -1487,14 +1487,19 @@ already burned this plan three times, at a larger scale.
 
 ## Sequencing
 
-1. **Fixtures first** — one crate per family A–F; gate must go RED with the expected FATAL set.
-2. Contract defects (cheap, independent): refusal honesty, refusal envelopes, `test`/`root`,
-   `generated`, `symbol` uniqueness.
-3. Family E (two loads) — matches Go's architecture; roughly doubles a run already at 130–270s
+1. **Instrument first (H1–H8 above).** No measurement is trustworthy until these close — including
+   "all 7 fixtures pass" and any before/after this phase takes. Start with the `considered == 0`
+   guard and the `cargo check` exit-status check; they are a handful of lines each.
+2. **Fixtures next** — one crate per family A–F; each must turn the gate RED with a FATAL that
+   matches its family. A fixture that does not go red is a decoration, not a test.
+3. Contract defects (cheap, independent): refusal honesty, refusal envelopes, `test`/`root`,
+   `generated`, `symbol` uniqueness. Note `generated` also closes H1 — one root cause, two victims.
+4. Family E (two loads) — matches Go's architecture; roughly doubles a run already at 130–270s
    on a large workspace. Measure before and after; do not guess.
-4. Families A, C, F — mechanical once located.
-5. Family B (desugaring) — the deepest, and the one that unblocks tightening roots.
-6. Re-baseline `oracle-expected.json` per fixture only after each family is genuinely fixed.
+5. Families A, C, F — mechanical once located.
+6. Family B (desugaring) — the deepest, and the one that unblocks tightening roots.
+7. Re-baseline `oracle-expected.json` per fixture only after each family is genuinely fixed, and
+   give `collision`'s entry 2 a linked fix task rather than permanent adjudication.
 
 **Do not wire a magma-side Rust backend, and do not change
 `~/.claude/skills/magma/SKILL.md`'s "Rust is in development" line, until A–F are closed.** That
