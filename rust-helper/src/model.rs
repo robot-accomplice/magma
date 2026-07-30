@@ -93,6 +93,21 @@ pub struct Function {
     pub bench: bool,
     /// Build-script- or macro-generated code.
     pub generated: bool,
+    /// Family D disclosure: set when `walk.rs`'s macro-expansion-depth guard
+    /// (`walk::MACRO_DEPTH_LIMIT`) cut off descent somewhere while walking
+    /// this function's own body (or, for a synthesized "init" node — Family
+    /// C — its initializer expression). A truncated expansion is
+    /// indistinguishable from one containing no further calls, so THIS
+    /// FUNCTION'S OWN outgoing-edge set is incomplete when this is `true` —
+    /// any callee past the guard is invisible, and cannot be told apart from
+    /// one that was never there. This is per-function, not a single global
+    /// "something somewhere was truncated" flag, so a consumer can withhold
+    /// judgement on exactly the functions affected rather than the whole
+    /// graph: a dead-code verdict for a function with `macro_truncated:
+    /// true` rests on incomplete evidence and should not be reported without
+    /// disclosing that. Never used by the helper itself to exclude or
+    /// suppress anything (§Non-negotiable) — it only discloses the fact.
+    pub macro_truncated: bool,
     pub signature: Signature,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
