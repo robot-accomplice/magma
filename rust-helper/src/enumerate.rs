@@ -2,8 +2,9 @@
 
 use ra_ap_cfg::{CfgAtom, CfgExpr};
 use ra_ap_hir::{
-    AsAssocItem, AssocItem, AssocItemContainer, Crate, DisplayTarget, HasAttrs, HasSource,
-    HasVisibility, HirDisplay, HirFileId, InFile, MacroKind, ModuleDef, Semantics, Visibility,
+    AsAssocItem, AssocItem, AssocItemContainer, Const, Crate, DisplayTarget, HasAttrs, HasSource,
+    HasVisibility, HirDisplay, HirFileId, InFile, MacroKind, Module, ModuleDef, Semantics, Static,
+    Visibility,
 };
 use ra_ap_ide_db::base_db::CrateOrigin;
 use ra_ap_ide_db::line_index::{TextSize, WideEncoding};
@@ -55,6 +56,281 @@ pub fn collect(
         }
     }
     out
+}
+
+/// A const or static item with an initializer expression — the two shapes
+/// Family C's synthesized nodes wrap (see `collect_inits`). `walk::init_edges`
+/// re-derives the initializer's syntax tree from this handle inside its own
+/// `Semantics`/`attach_db` context, exactly like `walk::edges` re-derives a
+/// function's body from the `ra_ap_hir::Function` paired alongside each
+/// `model::Function` in `funcs`. `Const` covers both a top-level const and
+/// an associated const (inherent impl, trait impl, or a trait's own
+/// default-valued declaration) — Rust admits associated consts but never
+/// associated statics, so `Static` is only ever a top-level module item.
+pub enum InitSource {
+    Const(Const),
+    Static(Static),
+}
+
+/// Every const/static/associated-const item WITH an initializer expression
+/// in workspace-member crates (Family C: `walk::edges` only ever visits
+/// `f.source(db).value.body()` for an enumerated function, so a call written
+/// in a const/static/associated-const initializer — never itself a function
+/// body, nor contained in one — was structurally invisible; see
+/// `push_const`/`push_static` for why a declaration-only item, e.g. a
+/// trait's own const with no default or an `extern` static, is skipped
+/// rather than emitted as a node with no possible outgoing edges). Each
+/// synthesized node gets its own id continuing the id space `next_id` starts
+/// at — the caller passes `funcs.len()`, the real-function count, so ids
+/// stay globally unique across the whole `functions` array `main.rs` emits;
+/// real functions never renumber, so this is purely additive to the id
+/// space, not a reassignment.
+///
+/// Deliberately a second, independent crate/module/impl traversal rather
+/// than folding into `collect()`'s existing loop: `collect()` is shared with
+/// a concurrently active task's `walk.rs` desugaring work, and keeping this
+/// function untouched avoids any merge risk. The small duplication of the
+/// traversal shape (crate -> module -> declarations/impl_defs) is the
+/// accepted cost.
+///
+/// Anonymous `const _: T = expr;` items (no name to qualify a symbol from)
+/// are skipped in `push_const` — a distinct, rarer pattern absent from every
+/// fixture this task touches; naming them would need positional numbering,
+/// reintroducing exactly the collision risk `qualified_init_symbol` exists
+/// to avoid. Not a NEW soundness gap: a call inside such a const's
+/// initializer simply stays unwalked, the same (pre-existing, safe-direction
+/// under-report, never a false-dead invention) gap every other
+/// un-enumerated item already has.
+pub fn collect_inits(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    target_dir: &AbsPath,
+    next_id: u32,
+) -> Vec<(model::Function, InitSource)> {
+    let mut out = Vec::new();
+    let mut next_id = next_id;
+    for krate in Crate::all(db) {
+        if !matches!(krate.origin(db), CrateOrigin::Local { .. }) {
+            continue;
+        }
+        for module in krate.modules(db) {
+            for decl in module.declarations(db) {
+                match decl {
+                    ModuleDef::Const(c) => {
+                        push_const(db, sema, vfs, root, target_dir, c, &mut next_id, &mut out)
+                    }
+                    ModuleDef::Static(s) => {
+                        push_static(db, sema, vfs, root, target_dir, s, &mut next_id, &mut out)
+                    }
+                    ModuleDef::Trait(tr) => {
+                        for item in tr.items(db) {
+                            if let AssocItem::Const(c) = item {
+                                push_const(db, sema, vfs, root, target_dir, c, &mut next_id, &mut out);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for imp in module.impl_defs(db) {
+                for item in imp.items(db) {
+                    if let AssocItem::Const(c) = item {
+                        push_const(db, sema, vfs, root, target_dir, c, &mut next_id, &mut out);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Same test-context detection as `is_test_context`, generalised to a
+/// const/static item's own cfg + ancestry. There is no `#[test]`-attribute
+/// analogue for a const/static, so unlike `is_test_context` this has no
+/// `f.is_test(db)` term; the other two signals — `tests`/`benches`
+/// directory membership, and an unconditional `#[cfg(test)]` requirement
+/// anywhere from the item itself up to the crate root — carry over
+/// unchanged, for the same fail-safe-toward-live reasoning documented on
+/// `is_test_context`.
+fn is_init_cfg_test<T: HasAttrs + Copy>(
+    db: &RootDatabase,
+    item: T,
+    module: Module,
+    file: &str,
+) -> bool {
+    in_test_or_bench_target(file)
+        || item.attrs(db).cfgs(db).is_some_and(cfg_requires_test)
+        || module.path_to_root(db).into_iter().any(|m| m.attrs(db).cfgs(db).is_some_and(cfg_requires_test))
+}
+
+/// Builds a synthesized `model::Function` node for `c`'s initializer, if it
+/// has one, and pushes it (paired with `InitSource::Const(c)`) onto `out`.
+/// Mirrors `push`'s real-file/macro-expansion location handling exactly
+/// (duplicated rather than shared, same precedent as `decl_loc`'s own doc
+/// comment: needing the raw `FileId` back for the `generated` check, not
+/// just a repo-relative string, is what stops this from calling `decl_loc`
+/// directly).
+fn push_const(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    target_dir: &AbsPath,
+    c: Const,
+    next_id: &mut u32,
+    out: &mut Vec<(model::Function, InitSource)>,
+) {
+    // No initializer -> nothing for walk.rs to walk and no `from` endpoint
+    // is ever needed (a trait's own const DECLARATION with no default,
+    // `const N: i32;`, has no body).
+    if c.value(db).is_none() {
+        return;
+    }
+    // Anonymous `const _: T = expr;` -- see collect_inits' doc comment.
+    let Some(name) = c.name(db) else { return };
+    let name = name.as_str().to_owned();
+    let Some(src) = c.source(db) else { return };
+    let Some(name_node) = src.value.name() else { return };
+
+    let (file_id, line, column) = match src.file_id.file_id() {
+        Some(efid) => {
+            let file_id = efid.file_id(db);
+            let (line, column) =
+                char_line_col(db, file_id, name_node.syntax().text_range().start());
+            (file_id, line, column)
+        }
+        None => {
+            sema.parse_or_expand(src.file_id);
+            let range = sema.original_range(name_node.syntax());
+            let file_id = range.file_id.file_id(db);
+            let (line, column) = char_line_col(db, file_id, range.range.start());
+            (file_id, line, column)
+        }
+    };
+    let file = repo_relative_path(vfs, root, file_id);
+
+    let module = c.module(db);
+    let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
+    let test = is_init_cfg_test(db, c, module, &file);
+    let ret_str = c.ty(db).display(db, display_target).to_string();
+    let results = if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
+
+    let id = *next_id;
+    *next_id += 1;
+    out.push((
+        model::Function {
+            id,
+            symbol: qualified_init_symbol(db, &name, c.as_assoc_item(db), display_target),
+            pkg: module_path_of(db, module),
+            file,
+            line: line + 1,
+            column: column + 1,
+            kind: "init".to_owned(),
+            exported: c.visibility(db) == Visibility::Public,
+            test,
+            // Runs whenever the enclosing (non-test) binary starts, so
+            // whatever it calls is genuinely reachable -- same reasoning as
+            // Go's synthesized `init#N` nodes, always roots. `!test`, not
+            // unconditional `true`: test-only code follows the same
+            // never-a-production-root rule `roots::mark` already applies to
+            // every other test item (see its doc comment) -- the all-roots
+            // view is where a #[cfg(test)] item's own root status belongs.
+            root: !test,
+            // No #[bench] analogue exists for a const/static item.
+            bench: false,
+            generated: is_macro_kind_synthetic(db, src.file_id)
+                || vfs
+                    .file_path(file_id)
+                    .as_path()
+                    .map(|p| p.starts_with(target_dir))
+                    .unwrap_or(false),
+            signature: model::Signature { params: Vec::new(), results },
+            doc: c.hir_docs(db).map(|d| first_sentence(d.docs())),
+            // Never an assoc item of a *trait impl* method -- `trait_impl`
+            // exists only to key the oracle harness's method-cascade check.
+            trait_impl: None,
+        },
+        InitSource::Const(c),
+    ));
+}
+
+/// `Static` counterpart to `push_const` -- see its doc comment for the
+/// shared reasoning; the only structural differences are `Static::name`
+/// returning a bare `Name` (not `Option<Name>`, so no anonymous-static case
+/// exists) and a static never being an associated item (Rust has no
+/// associated statics), so its symbol is always the unqualified `qualify_stem`
+/// fallback.
+fn push_static(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    target_dir: &AbsPath,
+    s: Static,
+    next_id: &mut u32,
+    out: &mut Vec<(model::Function, InitSource)>,
+) {
+    // `extern "C" { static FOO: i32; }` has no initializer -- skip, mirrors
+    // push_const's trait-const-declaration-with-no-default case.
+    if s.value(db).is_none() {
+        return;
+    }
+    let name = s.name(db).as_str().to_owned();
+    let Some(src) = s.source(db) else { return };
+    let Some(name_node) = src.value.name() else { return };
+
+    let (file_id, line, column) = match src.file_id.file_id() {
+        Some(efid) => {
+            let file_id = efid.file_id(db);
+            let (line, column) =
+                char_line_col(db, file_id, name_node.syntax().text_range().start());
+            (file_id, line, column)
+        }
+        None => {
+            sema.parse_or_expand(src.file_id);
+            let range = sema.original_range(name_node.syntax());
+            let file_id = range.file_id.file_id(db);
+            let (line, column) = char_line_col(db, file_id, range.range.start());
+            (file_id, line, column)
+        }
+    };
+    let file = repo_relative_path(vfs, root, file_id);
+
+    let module = s.module(db);
+    let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
+    let test = is_init_cfg_test(db, s, module, &file);
+    let ret_str = s.ty(db).display(db, display_target).to_string();
+    let results = if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
+
+    let id = *next_id;
+    *next_id += 1;
+    out.push((
+        model::Function {
+            id,
+            symbol: qualified_init_symbol(db, &name, None, display_target),
+            pkg: module_path_of(db, module),
+            file,
+            line: line + 1,
+            column: column + 1,
+            kind: "init".to_owned(),
+            exported: s.visibility(db) == Visibility::Public,
+            test,
+            root: !test, // see push_const's comment on the same field
+            bench: false,
+            generated: is_macro_kind_synthetic(db, src.file_id)
+                || vfs
+                    .file_path(file_id)
+                    .as_path()
+                    .map(|p| p.starts_with(target_dir))
+                    .unwrap_or(false),
+            signature: model::Signature { params: Vec::new(), results },
+            doc: s.hir_docs(db).map(|d| first_sentence(d.docs())),
+            trait_impl: None,
+        },
+        InitSource::Static(s),
+    ));
 }
 
 /// Resolves a UTF-8 byte `offset` in `file_id` to a (0-based line, 0-based
@@ -208,7 +484,24 @@ fn is_test_context(db: &RootDatabase, f: ra_ap_hir::Function, file: &str) -> boo
 ///     exact collision this fix exists to close.
 fn qualified_symbol(db: &RootDatabase, f: ra_ap_hir::Function, display_target: DisplayTarget) -> String {
     let name = f.name(db).as_str().to_owned();
-    let Some(assoc) = f.as_assoc_item(db) else { return name };
+    qualify_stem(db, &name, f.as_assoc_item(db), display_target)
+}
+
+/// The container-qualification logic shared by `qualified_symbol` (a
+/// function's own symbol) and `qualified_init_symbol` (a synthesized
+/// const/static initializer node's symbol, Family C) — see
+/// `qualified_symbol`'s doc comment above for the full collision rationale
+/// each of the three branches (bare / trait-declaration / impl) addresses;
+/// that reasoning is identical for a const/static/associated-const's own
+/// name, since Rust's three assoc-item shapes (free item, inherent-impl
+/// item, trait-impl item) apply to `const` exactly as they do to `fn`.
+fn qualify_stem(
+    db: &RootDatabase,
+    name: &str,
+    assoc: Option<AssocItem>,
+    display_target: DisplayTarget,
+) -> String {
+    let Some(assoc) = assoc else { return name.to_owned() };
     match assoc.container(db) {
         AssocItemContainer::Trait(tr) => format!("{}::{name}", tr.name(db).as_str()),
         AssocItemContainer::Impl(imp) => {
@@ -219,6 +512,26 @@ fn qualified_symbol(db: &RootDatabase, f: ra_ap_hir::Function, display_target: D
             }
         }
     }
+}
+
+/// Same collision-avoidance as `qualified_symbol`, for a synthesized
+/// const/static/associated-const initializer node (Family C — see
+/// `collect_inits`). Suffixed `#init`: `#` cannot appear in a Rust
+/// identifier or in anything `qualify_stem` produces, so an initializer
+/// node's symbol can never collide with a real function's — e.g. a
+/// top-level `const VALUE: i32 = ..;` becomes `"VALUE#init"`, an inherent
+/// associated const `impl W { const K: i32 = ..; }` becomes `"W::K#init"`.
+/// Deliberately NOT modelled on Go's per-file `init#1` counter: Rust's
+/// initializer sites are individually addressable named items, not one
+/// file-wide sequence, so keying on the item's own (qualified) name is both
+/// more precise and trivially unique without a counter.
+fn qualified_init_symbol(
+    db: &RootDatabase,
+    name: &str,
+    assoc: Option<AssocItem>,
+    display_target: DisplayTarget,
+) -> String {
+    format!("{}#init", qualify_stem(db, name, assoc, display_target))
 }
 
 fn push(
@@ -459,7 +772,12 @@ fn first_sentence(text: &str) -> String {
 
 /// "crate::module::path" for the function's containing module.
 fn module_path(db: &RootDatabase, f: ra_ap_hir::Function) -> String {
-    let module = f.module(db);
+    module_path_of(db, f.module(db))
+}
+
+/// Same as `module_path`, taking the `Module` directly — `push_const`/
+/// `push_static` have no `ra_ap_hir::Function` to call `.module(db)` on.
+fn module_path_of(db: &RootDatabase, module: Module) -> String {
     let krate = module.krate(db).display_name(db).map(|d| d.to_string()).unwrap_or_default();
     let mut parts: Vec<String> = module
         .path_to_root(db)

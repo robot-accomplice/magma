@@ -1,31 +1,12 @@
 {
-  "adjudication": "open-defect-family-a-fixed-family-c-blocked-on-node-model",
-  "fatal": [
-    {
-      "symbol": "handler_a",
-      "pkg": "fn_value",
-      "file": "src/main.rs",
-      "line": 9,
-      "column": 4,
-      "status": "open-defect",
-      "reason": "OPEN DEFECT (Plan A outcome, Family C) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `handler_a` appears only as an entry in the static fn-pointer table `static TABLE: [fn() -> i32; 1] = [handler_a];`, a top-level static item initializer. Family A is now fixed (walk.rs resolves a function referenced as a value anywhere inside an enumerated function's body, not just a CallExpr callee -- see the PathExpr-cast block added to walk()), which is why `double` (used inside `main`'s body via `.map(double)`) dropped out of this FATAL set. `handler_a`'s reference sits OUTSIDE any function body -- `static TABLE = [..]`'s initializer is never a descendant of any enumerated function's body syntax node -- so walk() never visits it at all regardless of the Family A fix (walk.rs walks only `f.source(db).value.body()`, Family C's cause). Confirmed structurally blocked, not merely unimplemented: even walking static/const initializers would still need a `Call.from` id for the initializer's own \"caller\", and top-level const/static items are never enumerated as `ra_ap_hir::Function`s and have no id in the from/to index -- inventing one would be a misleading edge (explicitly disallowed), and minting a legitimate one requires enumerate.rs (assign ids to const/static items) and model.rs/main.rs (plumb them into the id index and functions array), none of which this task may edit (owned by a concurrent task on main.rs/model.rs/roots.rs/enumerate.rs). rustc considers `handler_a` live (called indirectly through `TABLE[0]()` in `main`) and emits no dead_code warning. Fix tracked for Phase B, sequenced after the node-model extension; not suppressed or excluded here."
-    },
-    {
-      "symbol": "init_b_const",
-      "pkg": "fn_value",
-      "file": "src/main.rs",
-      "line": 12,
-      "column": 10,
-      "status": "open-defect",
-      "reason": "OPEN DEFECT (Plan A outcome, Family C) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `init_b_const` is called only from a static initializer (`static S: i32 = init_b_const();`), which is outside any enumerated function's body (walk.rs walks only `f.source(db).value.body()` -- Family C's cause) -- Family A's fix (resolving function-valued PathExpr uses inside a walked body) does not reach it because the call site itself is never inside a walked body in the first place. Same structural blocker as `handler_a` above: closing this requires assigning the static initializer its own node id via enumerate.rs/model.rs/main.rs, out of this task's file-ownership scope. rustc considers it live (used to compute `S`, which `main` prints) and emits no dead_code warning. Fix tracked for Phase B, sequenced after the node-model extension; not suppressed or excluded here."
-    }
-  ],
+  "adjudication": "fixed-family-a-and-family-c",
+  "fatal": [],
   "summary": {
-    "considered": 5,
+    "considered": 7,
     "excluded": 0,
     "agree_dead": 1,
-    "agree_live": 2,
-    "fatal": 2
+    "agree_live": 6,
+    "fatal": 0
   },
   "executed_target_code": true
 }
