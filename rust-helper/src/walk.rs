@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use ra_ap_hir::{
-    AsAssocItem, AssocItem, AssocItemContainer, HasSource, Impl, PathResolution, Semantics,
+    AsAssocItem, AssocItem, AssocItemContainer, HasSource, Impl, PathResolution, Semantics, Trait,
 };
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_paths::AbsPath;
@@ -203,40 +203,101 @@ fn walk(
         }
         if let Some(mcall) = ast::MethodCallExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_method_call(&mcall) {
-                match f.as_assoc_item(db).map(|assoc| assoc.container(db)) {
-                    Some(AssocItemContainer::Trait(t)) => {
-                        // `dyn Trait` receiver: resolve_method_call gives back the
-                        // trait's own declared function `f` itself, not a concrete
-                        // impl. Over-approximate, mirroring Go's RTA: emit one
-                        // dynamic edge to every impl of this trait method in the
-                        // workspace. Extra edges under-report dead code (safe);
-                        // missing edges invent it.
-                        //
-                        // `f` (the declaration) is now ALSO enumerated as its own
-                        // node (Task 9), so it needs an edge of its own too: with
-                        // only the impl edges above, the declaration itself has
-                        // zero incoming edges and is falsely reported dead even
-                        // when rustc is silent (verified: `trait Speak { fn
-                        // speak(&self); }` dispatched via `&dyn Speak` — rustc
-                        // never warns, but pre-fix the helper marked `Speak::speak`
-                        // unreachable). Marked dynamic like the impl edges — it's
-                        // a dispatch, not a static call.
-                        out.push(site(sema, &n, f, true, db, vfs, root));
-                        let name = f.name(db);
-                        for imp in Impl::all_for_trait(db, t) {
-                            for item in imp.items(db) {
-                                if let AssocItem::Function(impl_fn) = item {
-                                    if impl_fn.name(db) == name {
-                                        out.push(site(sema, &n, impl_fn, true, db, vfs, root));
-                                    }
-                                }
-                            }
+                push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+        }
+        // Family B: desugared calls. Each of these expression forms invokes a
+        // trait method without ever producing a syntactic CallExpr/
+        // MethodCallExpr — `walk` above only ever looks for those two node
+        // shapes, so e.g. `a + b` or `x.await` had NO edge at all, and the
+        // trait impl they invoke read as dead. `Semantics` exposes real
+        // resolution for each of these (confirmed against the pinned
+        // ra_ap_hir=0.0.343 source, not name-matched), landing on the exact
+        // impl `rustc` would pick for a concrete type, or on the trait's own
+        // declared function when the receiver type is still generic at this
+        // call site (mirrors the `dyn Trait` fallback above via the same
+        // `push_resolved` helper). `a[i]` intentionally covers `Index` only:
+        // `sema.resolve_index_expr` itself already folds in the `IndexMut`
+        // case (see its doc comment upstream) when inference selected it, so
+        // there is nothing left for this call site to special-case.
+        if let Some(bin) = ast::BinExpr::cast(n.clone()) {
+            if let Some(f) = sema.resolve_bin_expr(&bin) {
+                push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+        }
+        if let Some(prefix) = ast::PrefixExpr::cast(n.clone()) {
+            if let Some(f) = sema.resolve_prefix_expr(&prefix) {
+                push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+        }
+        if let Some(index) = ast::IndexExpr::cast(n.clone()) {
+            if let Some(f) = sema.resolve_index_expr(&index) {
+                push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+        }
+        if let Some(await_expr) = ast::AwaitExpr::cast(n.clone()) {
+            if let Some(f) = sema.resolve_await_to_poll(&await_expr) {
+                push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+        }
+        if let Some(try_expr) = ast::TryExpr::cast(n.clone()) {
+            // Resolves `Try::branch` — the first half of `?`'s desugaring.
+            // For the two Try implementors stable Rust allows (`Result`,
+            // `Option`), `branch` lives in core, so this edge is real but
+            // never workspace-local (dropped by the `index` lookup in
+            // `edges`/`init_edges`, same as any other out-of-workspace
+            // target — harmless). What this does NOT resolve: the implicit
+            // `From::from` error-type conversion `?` also performs via
+            // `FromResidual` when the function's error type differs from the
+            // propagated one — that conversion has no expression node of its
+            // own for `Semantics` to resolve (it is a hidden argument to
+            // `FromResidual::from_residual`, itself synthesized, with no
+            // pinned-API equivalent of `resolve_await_to_poll` exposing it).
+            // A user's `impl From<E1> for E2` reached only via `?` is
+            // therefore still open — see the Task B report.
+            if let Some(f) = sema.resolve_try_expr(&try_expr) {
+                push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+        }
+    }
+}
+
+/// Given a function resolved via any dispatch path — a syntactic method
+/// call, or one of the desugared-operator resolutions above — emit the right
+/// edge or edges. If resolution landed on a trait's own declared function
+/// (`AssocItemContainer::Trait`) rather than a concrete impl — the shape
+/// both `dyn Trait` dispatch AND a still-generic desugared call site (e.g. a
+/// `T: Add` bound with no concrete `T` at this call site) take — over-
+/// approximate: emit a dynamic edge to the trait's own declaration node
+/// (Task 9) AND to every impl of that method in the workspace, mirroring
+/// Go's RTA. Extra edges under-report dead code (safe, the required
+/// direction); missing edges invent it. A concrete resolution (inherent impl,
+/// or a trait impl on a known concrete type) instead emits a single static
+/// edge to the exact target.
+fn push_resolved(
+    sema: &Semantics<'_, RootDatabase>,
+    n: &SyntaxNode,
+    f: ra_ap_hir::Function,
+    out: &mut Vec<Site>,
+    db: &RootDatabase,
+    vfs: &Vfs,
+    root: &AbsPath,
+) {
+    match f.as_assoc_item(db).map(|assoc| assoc.container(db)) {
+        Some(AssocItemContainer::Trait(t)) => {
+            out.push(site(sema, n, f, true, db, vfs, root));
+            let name = f.name(db);
+            for imp in Impl::all_for_trait(db, t) {
+                for item in imp.items(db) {
+                    if let AssocItem::Function(impl_fn) = item {
+                        if impl_fn.name(db) == name {
+                            out.push(site(sema, n, impl_fn, true, db, vfs, root));
                         }
                     }
-                    _ => out.push(site(sema, &n, f, false, db, vfs, root)),
                 }
             }
         }
+        _ => out.push(site(sema, n, f, false, db, vfs, root)),
     }
 }
 
