@@ -102,6 +102,38 @@ fn walk(
                 }
             }
         }
+        // Family A: a function referenced as a VALUE (not called directly) —
+        // `.map(double)`, a struct-field initializer (`Cfg { cb: cb_target }`),
+        // a plain `let g = f;` binding, an array/table literal entry. Any of
+        // these puts a bare PathExpr resolving to a function somewhere other
+        // than a CallExpr's own callee slot; the callee slot is already
+        // handled above (and must be excluded here, or it would double up).
+        // Taking a function's address is not the same as calling it — we
+        // cannot see whether/where the resulting value is ever invoked (that
+        // would require real data-flow analysis, out of scope here) — so
+        // this is marked `dynamic`, matching the existing `dyn Trait`
+        // dispatch edges below: an approximation, not a proven direct call.
+        // Mirrors Go's RTA treatment of address-taken functions. Emitting
+        // this edge over-approximates liveness, which is the safe direction
+        // (fails toward "live", never toward a false-dead deletion order);
+        // omitting it is exactly the Family A false-dead-code defect.
+        if let Some(pe) = ast::PathExpr::cast(n.clone()) {
+            let is_call_callee = pe
+                .syntax()
+                .parent()
+                .and_then(ast::CallExpr::cast)
+                .and_then(|call| call.expr())
+                .is_some_and(|callee| callee.syntax() == pe.syntax());
+            if !is_call_callee {
+                if let Some(path) = pe.path() {
+                    if let Some(PathResolution::Def(ra_ap_hir::ModuleDef::Function(f))) =
+                        sema.resolve_path(&path)
+                    {
+                        out.push(site(sema, &n, f, true, db, vfs, root));
+                    }
+                }
+            }
+        }
         if let Some(mcall) = ast::MethodCallExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_method_call(&mcall) {
                 match f.as_assoc_item(db).map(|assoc| assoc.container(db)) {
