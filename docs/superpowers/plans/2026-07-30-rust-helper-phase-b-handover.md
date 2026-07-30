@@ -195,3 +195,66 @@ rows — the first non-synthetic exercise of their reachability badges).
 - Task briefs/reports/ledger: `.superpowers/sdd/2026-07-29-rust-helper/` (gitignored — the durable
   record is the plan doc). The ledger's tail carries two explicit corrections to earlier entries.
 - **Not merged, and should not be** until families A–F are closed.
+
+---
+
+# Phase B progress — appended 2026-07-30, after the user directed "fix it"
+
+The user rejected merging this as unwired groundwork ("we're not leaving unwired groundwork in
+that state -- wire it up"), and when told that wiring it as-is would emit false dead-code rows,
+answered **"Fix it."** So Phase B is being executed, not deferred. Wiring happens only after
+families A–F close.
+
+## Closed and independently verified
+
+| Item | Evidence |
+|---|---|
+| **H1** — `considered:0` reported as green | `testdata/fixture` copied to `/tmp/build/proj` went from `considered:0, excluded:12(generated), fatal:0` to `considered:11, excluded:1(test)`. It now measures. `generated`'s `/target/` test is anchored to the real target dir via `cargo metadata` |
+| **H2** — `cargo check` exit status discarded | A crate with a type error now exits **6** (refusal) instead of 0 with every function booked `agree_live` |
+| **H3, H4, H6, H7, H8** | Doc-comment prose no longer matches the attribute scan; oracle widened to `--all-targets`; exit-3 refusal path reachable; crate-level `#![allow(dead_code)]` disclosed; `executed_target_code` asserted and pinned in every baseline |
+| **H5** — no test-profile oracle | Now two configs: production-roots BFS vs plain `cargo check`, and all-roots BFS vs `--profile test`. `test:true` no longer excluded from the test direction. Found and fixed a real trap: `--all-targets` already triggers a cfg(test) recompile, so a naive second invocation saw `Fresh` and false-refused on every fixture |
+| **Fixtures A–F** | Six added. Five reproduce as real FATALs; family F does not (see below) |
+| **Family A** — function-as-value | `walk.rs` resolves function-valued `PathExpr`s, not only `CallExpr` callees. Emitted as `dynamic` — address-taken ≠ called, over-approximating toward "live" |
+| **Family C** — initializer calls | Closed via **synthesized `init` nodes**, following Go's `init#N` precedent (verified: magma's own graph has 8). `{qualified}#init`, `kind:"init"` (new *value* = one-sided), rooted. `fn_value` and `const_init` both at `fatal:0` — verified by me, not just by a gate PASS |
+| **Contract defects 1–5** | `executed_target_code` honest per refusal site; every soft-refusal path emits `computable:false` JSON and Go's exit convention adopted (0=refusal, 2=usage); `test` derived from cfg-ancestry + target kind so `#[cfg(test)] pub mod` no longer becomes a production root; `generated` no longer swallows hand-written `macro_rules!`; `symbol` qualified (`<T as Trait>::m`) so `(pkg,symbol)` is unique |
+
+**Behavioural change worth knowing before wiring:** fixing `test` derivation means a crate whose
+only `pub` items live under `#[cfg(test)]` now **refuses** ("no roots in scope") where it
+previously reported a confident production root. Correct, and in the safe direction, but real
+crates will start refusing where they previously produced a map.
+
+## Still open
+
+- **Family B (desugaring)** — in flight. The deepest, and the one that unblocks tightening roots.
+- **Family E (two loads)** — in flight. `cfg_test_global` still cannot gate without an artificial
+  test-caller workaround; the single permanently-cfg(test)-on load is the root cause.
+- **Family D (depth-8 macro guard)** — not started. Owns `walk.rs`, so it is queued behind B.
+- **Family F (toolchain nodes)** — **needs a different check entirely.** Confirmed real as a
+  metadata defect (`#[derive(Debug)]` resolves a node into `~/.rustup/.../core/src/fmt/mod.rs`),
+  but rust-analyzer marks that node `root:true` regardless of visibility, so a *reachability*
+  comparison can structurally never disagree with rustc about it. The right check is an assertion
+  that no node's `file` falls outside the workspace root — not a fixture.
+- Contract-task residuals: `cfg_requires_test` does not handle `any(test, …)`/`not(…)`;
+  `tests/`/`benches/` detection is path-component-based rather than real Cargo target metadata;
+  the type-error refusal's per-file diagnostic scan is unmeasured on a large workspace.
+- **The gate is green with open defects recorded as such.** Baselines carry a per-entry
+  `status: "open-defect"` with a reason that explicitly distinguishes them from `libonly`/
+  `collision`'s permanent adjudications. Do not let those two categories blur.
+
+## Correction to this document's own earlier claim
+
+An earlier revision said every absolute-path node being `generated:true` meant filtering
+`generated` removed them completely. True of the data, **false as a statement about consumers** —
+Architext's visibility predicate is a union, so `prod_reachable && generated` is admitted before
+the `generated` toggle can veto it. They measured 9 of 201 still visible. Brief consumers on the
+data property and the filter property separately.
+
+## Architext status — closed, nothing outstanding
+
+Both sample artifacts validated clean. The badge reconciliation is **exact**: their predicates and
+magma's views were written independently and both land on **23 dead / 611 test-only** across
+17,871 real roboticus functions, including the non-obvious `10,011 → 799 → 611` chain. That is the
+strongest evidence to date that `magma-code-graph/1` is unambiguous. `fidelity` is confirmed
+one-sided (their schema is `{"type":"string"}`, no enum) so `"semantic"` needs no coordination.
+They have been told no Rust artifact is coming soon, and that a real emit will be sent for
+validation before anything is wired — a process now three-for-three at catching defects pre-ship.
