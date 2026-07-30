@@ -1,0 +1,20 @@
+{
+  "fatal": [
+    {
+      "symbol": "hid_m",
+      "pkg": "libonly::hidden_trait",
+      "file": "src/lib.rs",
+      "line": 102,
+      "column": 12,
+      "reason": "Task-9 residual gap: trait-declaration node (trait_impl:null) of hid_m, whose whole trait+impl+type cluster (HidTr/HidS, neither re-exported) is independently dead -- nothing in the crate reaches HidTr at all. rustc's only diagnostic for the whole dead cluster is 'trait `HidTr` is never used' on the trait's own name line (101), never a second one on hid_m's own trait-declaration line (102). The trait-impl-cascade exclusion only ever covers impl nodes (trait_impl set, e.g. id=17 here); this is the trait-decl copy, architecturally uncovered by that mechanism. Same class as collision::dead_side::dead_method above."
+    },
+    {
+      "symbol": "priv_m",
+      "pkg": "libonly::hidden_prim_trait",
+      "file": "src/lib.rs",
+      "line": 130,
+      "column": 12,
+      "reason": "Task-9 residual gap, same class as hidden_trait::hid_m above: trait-declaration node (trait_impl:null) of priv_m, whose whole cluster is independently dead -- PrivTr is a private, never-reached trait. rustc's only diagnostic for the cluster is 'trait `PrivTr` is never used' on the trait's own name line (129), nothing on priv_m's own trait-declaration line (130). Distinct from the impl copy (id=19, PrivTr for i32), which IS correctly excluded by the trait-impl-cascade's builtin-self-type branch (i32 is not Adt-eligible for its own diagnostic) -- that mechanism does not and cannot reach this trait-decl copy, since trait_impl is null for it."
+    }
+  ]
+}

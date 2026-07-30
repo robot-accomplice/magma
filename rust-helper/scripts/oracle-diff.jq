@@ -125,4 +125,10 @@ def key(loc): loc.file + ":" + (loc.line|tostring) + ":" + (loc.column|tostring)
       report_only: ($report_only|length),
       agree_dead: ($agree_dead|length),
       agree_live: ($agree_live|length)
-    } | tostring)
+    } | tostring),
+  # Machine-readable form of the FATAL set (Task 16), consumed by
+  # scripts/oracle-gate.sh to diff against a committed per-fixture baseline.
+  # Kept as one prefixed line rather than a separate file so oracle-diff.sh's
+  # existing single-jq-invocation, tee'd-stdout shape doesn't need a second
+  # process or a second temp file just to expose this.
+  "FATAL_JSON " + ($fatal | map({symbol, pkg, file, line, column}) | tostring)
