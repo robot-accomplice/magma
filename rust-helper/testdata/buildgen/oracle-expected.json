@@ -6,5 +6,6 @@
     "agree_dead": 0,
     "agree_live": 3,
     "fatal": 0
-  }
+  },
+  "executed_target_code": true
 }

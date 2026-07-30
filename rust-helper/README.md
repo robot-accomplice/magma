@@ -64,11 +64,6 @@ logic.
 
 ## Known gaps before this is production
 
-- **No deduplication.** Every resolved target is pushed; Go's `collectEdges` aggregates per
-  `(from, to)` and upgrades `dynamic` → `static`. The 49,316 figure is therefore a raw count.
-- **No JSON output.** Emits ad-hoc `EDGE` lines; the spec's contract is one JSON document.
-- **No node metadata.** Does not yet emit `is_test` / `is_main` / `is_bench` flags, signatures,
-  file/line, or the crate/module path — all required by the contract.
 - **No refusals.** Missing toolchain and declined-consent paths are unimplemented.
 - **Crate name is `magma-rust-helper-spike`** — rename when it becomes the real helper.
 

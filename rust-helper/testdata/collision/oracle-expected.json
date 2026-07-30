@@ -6,7 +6,7 @@
       "file": "src/main.rs",
       "line": 12,
       "column": 12,
-      "reason": "Task-9 residual gap: trait-declaration node (trait_impl:null) of a method whose whole trait+impl+type cluster is independently dead. rustc collapses the whole-cluster-dead case to one diagnostic per item ('trait `Amb` is never used' on the trait's own name line 11, 'struct `Widget` is never constructed' on line 14) and emits nothing on dead_method's own declaration line (12) at either the trait-decl or impl copy \u2014 confirmed empirically, only 3 dead_code diagnostics exist for this whole crate, none naming dead_method. The trait-impl-cascade exclusion only ever covers impl nodes (trait_impl set); this is the trait-decl copy, architecturally uncovered by that mechanism."
+      "reason": "Task-9 residual gap: trait-declaration node (trait_impl:null) of a method whose whole trait+impl+type cluster is independently dead. rustc collapses the whole-cluster-dead case to one diagnostic per item ('trait `Amb` is never used' on the trait's own name line 11, 'struct `Widget` is never constructed' on line 14) and emits nothing on dead_method's own declaration line (12) at either the trait-decl or impl copy — confirmed empirically, only 3 dead_code diagnostics exist for this whole crate, none naming dead_method. The trait-impl-cascade exclusion only ever covers impl nodes (trait_impl set); this is the trait-decl copy, architecturally uncovered by that mechanism."
     },
     {
       "symbol": "live_method",
@@ -31,5 +31,6 @@
     "agree_dead": 1,
     "agree_live": 2,
     "fatal": 3
-  }
+  },
+  "executed_target_code": true
 }
