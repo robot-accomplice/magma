@@ -2,7 +2,7 @@
   "adjudication": "open-defect-awaiting-phase-b-fix",
   "fatal": [
     {
-      "symbol": "fmt",
+      "symbol": "<Widget as Display>::fmt",
       "pkg": "desugar",
       "file": "src/main.rs",
       "line": 17,
