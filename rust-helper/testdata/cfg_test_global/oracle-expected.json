@@ -1,31 +1,21 @@
 {
-  "adjudication": "open-defect-awaiting-phase-b-fix",
-  "fatal": [
-    {
-      "symbol": "clock_helper",
-      "pkg": "cfg_test_global",
-      "file": "src/lib.rs",
-      "line": 33,
-      "column": 4,
-      "status": "open-defect",
-      "reason": "OPEN DEFECT (Plan A outcome, Family E) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. main.rs forces cfg(test) on globally for the whole workspace load (cfg_overrides.global), so `#[cfg(not(test))] pub fn real_clock()` -- clock_helper's only caller -- is not merely misclassified, it never exists as a node at all (verified: the enumerated function list for this crate is exactly {clock_helper, other_root, tests::uses_it}; real_clock is entirely absent). With no incoming edge and no root, clock_helper reads dead. A plain `cargo check` (no cfg(test) forcing) compiles real_clock as public API and emits no dead_code warning for either function. NOTE on this fixture's shape: `tests::uses_it` (excluded from the comparison itself via the harness's own test:true normalisation) exists only so clock_helper stays genuinely live in BOTH of oracle-diff.sh's `--all-targets` compilations; without it, the harness's own cfg(test)-enabled `--all-targets` compilation unit coincidentally ALSO cannot see real_clock and independently reports clock_helper dead in that build, which makes the divergence disappear by accident (both sides agree \"dead\", FATAL:0) rather than exposing it -- confirmed directly: the same fixture without tests::uses_it produces FATAL:0 through this harness even though real_clock is still completely absent from the node list. Fix tracked for Phase B (the plan's own remedy is a second, cfg(test)-off workspace load, mirroring Go's two-load architecture); not suppressed or excluded here."
-    }
-  ],
+  "adjudication": "family-e-fixed",
+  "fatal": [],
   "summary": {
-    "considered": 2,
+    "considered": 3,
     "excluded": 1,
     "agree_dead": 0,
-    "agree_live": 1,
-    "fatal": 1
+    "agree_live": 3,
+    "fatal": 0
   },
   "executed_target_code": true,
-  "fatal_test_note": "H5 (test-config direction): fatal_test is empty here, but that does NOT mean Family E is fixed -- it means the test-config direction happens not to expose it. main.rs's single, permanently cfg(test)-on load still never enumerates `real_clock` at all, in EITHER view; that root cause is unchanged by H5 (H5 only adds a second ORACLE run and a second reachability computation over the helper's existing single graph, per its file-ownership boundary -- it does not touch main.rs's load). For the test-config comparison specifically, `real_clock`'s absence happens to be CORRECT rather than a divergence: the test-profile oracle (`cargo check --profile test`) also compiles with cfg(test) on, so it likewise never sees `#[cfg(not(test))] pub fn real_clock()`, and clock_helper is reached instead through `tests::uses_it` (now an all-roots seed as a literal #[test] function), matching the oracle's own verdict. So both sides agree for the reason the test-config direction was built to measure, not because Family E was fixed. Family E remains open, gated on a second cfg(test)-OFF helper load (Phase B, src/main.rs) -- see the plain-config `fatal[0].reason` above, and the H5 task report for confirmation this fixture still cannot be gated without its `tests::uses_it` workaround.",
+  "note": "Family E (Phase B, Task E): main.rs now runs TWO workspace loads -- cfg(test) off (production) and cfg(test) on (test) -- and merges them by (file, line, column, symbol) identity, mirroring Go's two-`packages.Load` architecture. `real_clock` (`#[cfg(not(test))] pub fn`) is now enumerated by the cfg(test)-off pass regardless of the cfg(test)-on pass's own view, so its edge to `clock_helper` survives the merge and both are correctly live. `considered` moved 2 -> 3 because `real_clock` is now a node at all (previously silently absent, not merely misclassified). This fixture's `tests::uses_it` workaround was investigated for removal and found still load-bearing, for a DIFFERENT reason than the original defect: oracle-diff.sh's plain-config oracle pools diagnostics from BOTH sub-compilations `cargo check --all-targets` triggers (the normal build AND the implicit cfg(test)-on unittests build) into one dead-span set. Without `tests::uses_it`, if this fix ever regressed, the cfg(test)-on sub-compilation would independently (and accidentally) report `clock_helper` dead too, so both sides would agree \"dead\" (SUMMARY's `agree_dead`, not `fatal`) and the regression would NOT surface as a FATAL -- `report_only` isn't gated by oracle-gate.sh, only `considered/excluded/agree_dead/agree_live/fatal` are. Verified directly: with `tests::uses_it` removed, oracle-gate.sh against the FIXED binary shows `report_only:1, fatal:0` (safe -- helper says live, oracle's polluted view says dead), but against the PRE-fix binary the exact same simplified fixture instead shows `agree_dead:1, fatal:0` -- the accidental-agreement masking the original doc comment already predicted, now reproduced. Kept in place; not a fixture that outlived its purpose.",
   "fatal_test": [],
   "summary_test": {
-    "considered": 3,
+    "considered": 4,
     "excluded": 0,
     "agree_dead": 0,
-    "agree_live": 3,
+    "agree_live": 4,
     "fatal": 0
   }
 }
