@@ -18,5 +18,23 @@
     "agree_live": 1,
     "fatal": 1
   },
-  "executed_target_code": true
+  "executed_target_code": true,
+  "fatal_test": [
+    {
+      "symbol": "base_case",
+      "pkg": "macro_depth",
+      "file": "src/main.rs",
+      "line": 17,
+      "column": 4,
+      "status": "open-defect",
+      "reason": "H5 (test-config direction): same OPEN DEFECT as the plain-config entry above, reproduced identically under the test-profile oracle. The macro nesting and walk.rs's depth-8 truncation are unrelated to cfg(test) -- this fixture has no test/bench entry point, so the all-roots seed equals the production-roots set and the helper's truncated walk still never reaches base_case. rustc's test-profile compile fully expands the same macro nesting and emits no dead_code warning for base_case, matching the plain-config oracle. Same root cause, same fix tracked for Phase B; not suppressed or excluded here."
+    }
+  ],
+  "summary_test": {
+    "considered": 2,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 1,
+    "fatal": 1
+  }
 }
