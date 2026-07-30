@@ -44,6 +44,24 @@ Measured on roboticus-rust (575k lines): 48.4s total, 8,437 functions, 49,316 ra
    backend's `inModule` filter, and omitting it produces exactly the false-dead-code failure
    HANDOFF.md already records for Go.
 
+## Checking helper output against rustc (the oracle harness)
+
+`scripts/oracle-diff.sh <workspace-root>` cross-references the helper's derived dead set against
+rustc's own `dead_code` lint on a `cargo check`; `scripts/oracle-gate.sh <workspace-root>` wraps
+it into a pass/fail gate against a committed per-fixture baseline
+(`testdata/<crate>/oracle-expected.json`), since two fixtures carry adjudicated FATALs by design
+and a bare exit code can't tell "known" from "new" apart:
+
+```sh
+cargo build --release
+cargo clean --manifest-path testdata/collision/Cargo.toml   # oracle-diff.sh refuses on a warm cache
+scripts/oracle-gate.sh testdata/collision
+```
+
+Not wired into CI (no Rust CI job exists in this repo yet) — run it directly against any
+`testdata/*` fixture, or a real workspace, before trusting a change to the helper's reachability
+logic.
+
 ## Known gaps before this is production
 
 - **No deduplication.** Every resolved target is pushed; Go's `collectEdges` aggregates per

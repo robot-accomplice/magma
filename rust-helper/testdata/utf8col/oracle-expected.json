@@ -1,3 +1,10 @@
 {
-  "fatal": []
+  "fatal": [],
+  "summary": {
+    "considered": 3,
+    "excluded": 0,
+    "agree_dead": 2,
+    "agree_live": 1,
+    "fatal": 0
+  }
 }

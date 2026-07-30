@@ -293,6 +293,14 @@ requirements rather than leaving them as tribal knowledge. At minimum, the Rust 
 reachability from `root` functions over `calls`, diffed by exact `file:line` key against
 `cargo check --message-format=json`'s `dead_code` diagnostics. Direction matters — helper-dead/
 oracle-live is FATAL (false dead code), helper-live/oracle-dead is conservative (report-only).
+Two fixtures (`libonly`, `collision`) carry FATALs that are honest and adjudicated rather than
+bugs (Task 9's residual gap — see below), so `oracle-diff.sh`'s own exit code is not usable as a
+pass/fail gate on its own. `rust-helper/scripts/oracle-gate.sh <workspace-root>` (Task 16) is the
+gate built on top of it: it diffs the observed FATAL set and SUMMARY counts against a committed
+per-fixture baseline (`testdata/<crate>/oracle-expected.json`) and exits 0 only on an exact match,
+so a red run is always real signal. Not wired into CI yet (this repo currently has zero Rust CI
+jobs of any kind; see `rust-helper/README.md`) but runnable directly against any of the seven
+`testdata/` fixtures.
 
 **Fixtures — FATAL = 0 on all three:**
 
