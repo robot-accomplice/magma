@@ -50,12 +50,6 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(EXIT_USAGE);
     };
 
-    let mut cargo_config = CargoConfig::default();
-    cargo_config.sysroot = Some(RustLibSource::Discover);
-    cargo_config.cfg_overrides = CfgOverrides {
-        global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
-        selective: Default::default(),
-    };
     let load_config = LoadCargoConfig {
         load_out_dirs_from_check: true,
         with_proc_macro_server: ProcMacroServerChoice::Sysroot,
@@ -66,30 +60,11 @@ fn main() -> anyhow::Result<()> {
     // Whether loading the workspace ran the repo's own code: build scripts
     // executed and a proc-macro server expanded macros. Derived from the
     // config actually passed to load_workspace_at, not hard-coded, so it
-    // stays honest if a sandboxed or no-execution mode is ever added.
+    // stays honest if a sandboxed or no-execution mode is ever added. Shared
+    // by both configs below — `load_config` itself never varies between
+    // them, only `cfg_overrides` does.
     let executed_target_code = load_config.load_out_dirs_from_check
         && load_config.with_proc_macro_server != ProcMacroServerChoice::None;
-
-    // Contract defect 2 (not a cargo project / workspace load failure):
-    // previously `?` propagated straight into anyhow, printing `Error: ...`
-    // and exiting 1 with no JSON. `load_workspace_at` fails at
-    // `ProjectManifest::discover_single` or `ProjectWorkspace::load` — both
-    // BEFORE it runs build scripts (see `run_build_scripts`, called only
-    // after both succeed) — so `executed_target_code` is honestly `false`
-    // here: nothing of the target's own code ran.
-    let (db, vfs, _p) =
-        match load_workspace_at(Path::new(&root), &cargo_config, &load_config, &|_s| {}) {
-            Ok(v) => v,
-            Err(e) => {
-                let r = model::Refusal::new(
-                    false,
-                    format!("not a computable cargo workspace: {e:#}"),
-                );
-                println!("{}", serde_json::to_string_pretty(&r)?);
-                std::process::exit(0);
-            }
-        };
-    eprintln!("TIMING load_workspace: {:.1}s", t0.elapsed().as_secs_f64());
 
     // Same absolute-path computation load_workspace_at uses internally, so
     // stripping this prefix from vfs paths yields a repo-relative path.
@@ -101,60 +76,75 @@ fn main() -> anyhow::Result<()> {
     // setting in `.cargo/config.toml` is still honoured correctly.
     let target_dir_abs = discover_target_dir(&root_abs)?;
 
-    let host = AnalysisHost::with_database(db);
-    let analysis = host.analysis();
-    let db = host.raw_database();
-
-    let t1 = Instant::now();
-    // Function ids are the index of the function in the enumeration vector.
-    // Signature/type display requires the salsa db to be attached to this
-    // thread (same requirement as the Semantics-based edge extraction below).
-    let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
-        let sema = Semantics::new(db);
-        let mut funcs =
-            enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
-        roots::mark(db, &mut funcs);
-        funcs
-    });
-    eprintln!(
-        "TIMING enumerate: {:.1}s for {} functions",
-        t1.elapsed().as_secs_f64(),
-        funcs.len()
-    );
-
-    // Contract defect 2 (workspace with type/load errors): `load_workspace_at`
-    // does NOT type-check on load — verified directly: a crate with a plain
-    // type error (`let x: i32 = "not a number";`) loads and enumerates
-    // cleanly with the code as it stood before this fix, producing a full,
-    // silently-wrong Output rather than any refusal at all. magma's contract
-    // must never hand back a partial or degraded map, so scan every
-    // workspace-local real source file for a Severity::Error diagnostic
-    // (RA's own semantic diagnostics — type mismatches, unresolved paths,
-    // etc.) and refuse before ever reaching the roots/edges computation.
-    // `executed_target_code` is honestly `true` here: `load_workspace_at`
-    // already succeeded, running build scripts and expanding proc macros.
-    let error_files =
-        workspace_type_errors(&analysis, &vfs, root_abs.as_path(), target_dir_abs.as_path())?;
-    if !error_files.is_empty() {
-        let r = model::Refusal::new(
-            executed_target_code,
-            format!(
-                "{} file(s) contain type/load errors; reachability not computable: {}",
-                error_files.len(),
-                error_files.join(", ")
-            ),
-        );
-        println!("{}", serde_json::to_string_pretty(&r)?);
-        std::process::exit(0);
+    if use_outgoing {
+        // Debug/comparison mode only (never emits Output; not part of the
+        // JSON contract, not exercised by the oracle harness) — kept as the
+        // single, permanently cfg(test)-on load it always was. Family E's
+        // fix below is scoped to the real Output path.
+        run_outgoing_mode(&root, &root_abs, &target_dir_abs, &load_config)?;
+        return Ok(());
     }
 
-    if !funcs.iter().any(|(n, _)| n.root) {
-        // Contract defect 1: `load_workspace_at` above already ran build
-        // scripts and expanded proc macros by the time this fires, so
-        // `executed_target_code` (computed from the actual load config, not
-        // a hard-coded constant) is honestly `true` here — a refusal is not
+    // Family E fix: TWO workspace loads, merged into one graph, instead of
+    // one load with cfg(test) forced on globally and permanently. A single
+    // cfg(test)-on load makes rust-analyzer's own item enumeration treat
+    // every `#[cfg(not(test))]` item as if it did not exist — not merely
+    // misclassified, structurally absent — so anything reachable only
+    // through it read as false dead code. Go's backend takes the same two-
+    // load shape for the identical reason (see internal/backend/golang.go).
+    // `analyze_one_config`'s only difference between the two calls is
+    // `cfg_overrides`; everything else (load_config, root, target_dir_abs)
+    // is identical, so any behavioural difference between them comes
+    // entirely from that one setting.
+    let t_prod = Instant::now();
+    let prod = analyze_one_config(
+        &root,
+        &root_abs,
+        &target_dir_abs,
+        &load_config,
+        executed_target_code,
+        CfgOverrides::default(), // cfg(test) OFF: matches an ordinary `cargo check`
+    )?;
+    eprintln!("TIMING prod-config (cfg(test) off): {:.1}s", t_prod.elapsed().as_secs_f64());
+    let (prod, prod_has_root) = match prod {
+        LoadOutcome::Refused(r) => {
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            std::process::exit(0);
+        }
+        LoadOutcome::Ok { output, has_root } => (output, has_root),
+    };
+
+    let t_test = Instant::now();
+    let test = analyze_one_config(
+        &root,
+        &root_abs,
+        &target_dir_abs,
+        &load_config,
+        executed_target_code,
+        CfgOverrides {
+            global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
+            selective: Default::default(),
+        }, // cfg(test) ON
+    )?;
+    eprintln!("TIMING test-config (cfg(test) on): {:.1}s", t_test.elapsed().as_secs_f64());
+    let (test, test_has_root) = match test {
+        LoadOutcome::Refused(r) => {
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            std::process::exit(0);
+        }
+        LoadOutcome::Ok { output, has_root } => (output, has_root),
+    };
+
+    if !prod_has_root && !test_has_root {
+        // Contract defect 1: both loads above already ran build scripts and
+        // expanded proc macros by the time this fires, so
+        // `executed_target_code` is honestly `true` here — a refusal is not
         // automatically "nothing executed". Exit 0, not 2 (see EXIT_USAGE):
         // this is a real, computable answer, matching Go's convention.
+        // Checked only after BOTH configs are in, not either alone: a root
+        // that exists only under one cfg (the exact Family E shape) must
+        // still count — refusing here on one config's root set alone would
+        // just move the false-dead-code defect one refusal earlier.
         let r = model::Refusal::new(
             executed_target_code,
             "no roots in scope (no binary target and no public API); reachability not computable",
@@ -163,76 +153,350 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(0);
     }
 
+    let t_merge = Instant::now();
+    let merged = merge_configs(prod, test);
+    eprintln!(
+        "TIMING merge: {:.1}s for {} functions, {} calls",
+        t_merge.elapsed().as_secs_f64(),
+        merged.functions.len(),
+        merged.calls.len()
+    );
+    eprintln!("TIMING TOTAL: {:.1}s", t0.elapsed().as_secs_f64());
+
+    let out = model::Output::new(executed_target_code, merged.functions, merged.calls);
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Nodes + edges from one full analysis pass, in that pass's OWN local id
+/// space (0..N). Never compared or merged by id directly — two different
+/// `load_workspace_at` calls produce two independent `RootDatabase`s, so a
+/// `ra_ap_hir::Function`/id from one means nothing in the other. Only
+/// `merge_configs` (keyed on file/line/column/symbol identity) may combine
+/// two of these.
+struct ConfigOutput {
+    functions: Vec<model::Function>,
+    calls: Vec<model::Call>,
+}
+
+/// Result of one `analyze_one_config` call: either a refusal (load failure or
+/// type/load errors under that cfg setting), or a completed pass plus whether
+/// IT ALONE found any root — `main` only refuses "no roots in scope" after
+/// checking both configs together, so the caller needs this rather than a
+/// bare `ConfigOutput`.
+enum LoadOutcome {
+    Refused(model::Refusal),
+    Ok { output: ConfigOutput, has_root: bool },
+}
+
+/// One full analysis pass — workspace load, enumerate, roots, edges, Family C
+/// init nodes/edges — under one `cfg_overrides` setting. Called twice by
+/// `main` (cfg(test) off, then on) as the Family E fix. Identical to the
+/// single-load body this replaced except for taking `cfg_overrides` as a
+/// parameter instead of hard-coding cfg(test) on, and returning its result
+/// instead of emitting `Output` directly (the two calls' results are merged
+/// by `merge_configs` before anything is printed).
+fn analyze_one_config(
+    root: &str,
+    root_abs: &AbsPathBuf,
+    target_dir_abs: &AbsPathBuf,
+    load_config: &LoadCargoConfig,
+    executed_target_code: bool,
+    cfg_overrides: CfgOverrides,
+) -> anyhow::Result<LoadOutcome> {
+    let mut cargo_config = CargoConfig::default();
+    cargo_config.sysroot = Some(RustLibSource::Discover);
+    cargo_config.cfg_overrides = cfg_overrides;
+
+    // Contract defect 2 (not a cargo project / workspace load failure):
+    // `load_workspace_at` fails at `ProjectManifest::discover_single` or
+    // `ProjectWorkspace::load` — both BEFORE it runs build scripts (see
+    // `run_build_scripts`, called only after both succeed) — so
+    // `executed_target_code` is honestly `false` here: nothing of the
+    // target's own code ran.
+    let (db, vfs, _p) =
+        match load_workspace_at(Path::new(root), &cargo_config, load_config, &|_s| {}) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(LoadOutcome::Refused(model::Refusal::new(
+                    false,
+                    format!("not a computable cargo workspace: {e:#}"),
+                )));
+            }
+        };
+
+    let host = AnalysisHost::with_database(db);
+    let analysis = host.analysis();
+    let db = host.raw_database();
+
+    // Function ids are the index of the function in this config's OWN
+    // enumeration vector — local to this pass, remapped by identity in
+    // `merge_configs`. Signature/type display requires the salsa db to be
+    // attached to this thread (same requirement as the Semantics-based edge
+    // extraction below).
+    let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
+        let sema = Semantics::new(db);
+        let mut funcs =
+            enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
+        roots::mark(db, &mut funcs);
+        funcs
+    });
+
+    // Contract defect 2 (workspace with type/load errors): `load_workspace_at`
+    // does NOT type-check on load — verified directly: a crate with a plain
+    // type error (`let x: i32 = "not a number";`) loads and enumerates
+    // cleanly, producing a full, silently-wrong Output rather than any
+    // refusal at all. magma's contract must never hand back a partial or
+    // degraded map, so scan every workspace-local real source file for a
+    // Severity::Error diagnostic (RA's own semantic diagnostics — type
+    // mismatches, unresolved paths, etc.) and refuse before ever reaching
+    // the edges computation. `executed_target_code` is honestly the passed-
+    // in value here: `load_workspace_at` already succeeded, running build
+    // scripts and expanding proc macros.
+    let error_files =
+        workspace_type_errors(&analysis, &vfs, root_abs.as_path(), target_dir_abs.as_path())?;
+    if !error_files.is_empty() {
+        return Ok(LoadOutcome::Refused(model::Refusal::new(
+            executed_target_code,
+            format!(
+                "{} file(s) contain type/load errors; reachability not computable: {}",
+                error_files.len(),
+                error_files.join(", ")
+            ),
+        )));
+    }
+
+    let has_root = funcs.iter().any(|(n, _)| n.root);
+
     let index: HashMap<ra_ap_hir::Function, u32> =
         funcs.iter().map(|(mf, f)| (*f, mf.id)).collect();
 
-    let t2 = Instant::now();
-    let mut edges = 0usize;
-    let mut calls: Vec<model::Call> = Vec::new();
-    // Family C nodes (const/static/associated-const initializers) — see
-    // enumerate::collect_inits. Populated only on the non-outgoing path,
-    // same as `calls`; `--outgoing` is the pre-existing outgoing_calls
-    // comparison mode and never emits Output/functions at all.
-    let mut init_nodes: Vec<model::Function> = Vec::new();
-    if use_outgoing {
-        let cfg = CallHierarchyConfig { exclude_tests: false, ra_fixture: RaFixtureConfig::default() };
-        for (mf, f) in &funcs {
-            let Some(pos) = pos_of(db, *f) else { continue };
-            if let Ok(Some(items)) = analysis.outgoing_calls(&cfg, pos) {
-                for it in &items {
-                    println!("EDGE\t{}\t{}", mf.symbol, it.target.name);
-                }
-                edges += items.len();
+    // rust-analyzer's type inference requires the salsa DB attached to this
+    // thread. Analysis::with_db does this internally; using Semantics directly
+    // does not, and inference panics with "Try to use attached db, but not db
+    // is attached".
+    let (calls, init_nodes) = ra_ap_hir::attach_db(db, || {
+        let sema = Semantics::new(db);
+        let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &funcs, &index);
+        // Family C: gives every const/static/associated-const initializer
+        // its own synthesized node (a real id in this pass's `functions`
+        // array, never an invented/dangling one), then walks each
+        // initializer expression the same way a function body is walked, so
+        // a call made from one is no longer structurally invisible. See
+        // enumerate::collect_inits and walk::init_edges. `funcs.len()`
+        // continues the id space real functions already occupy — still
+        // purely local to this one pass.
+        let inits = enumerate::collect_inits(
+            db,
+            &sema,
+            &vfs,
+            root_abs.as_path(),
+            target_dir_abs.as_path(),
+            funcs.len() as u32,
+        );
+        let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &inits, &index);
+        calls.extend(init_edges);
+        let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
+        (calls, init_nodes)
+    });
+
+    let mut functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
+    functions.extend(init_nodes);
+
+    Ok(LoadOutcome::Ok { output: ConfigOutput { functions, calls }, has_root })
+}
+
+/// Node identity used to merge the two configs — deliberately NOT either
+/// config's own `id` (meaningless across two independent `RootDatabase`s).
+/// (file, line, column) is the declaration's own name-token position — see
+/// `model::Function::column` — and does not move when only `cfg(test)`
+/// changes; `symbol` is included because `enumerate::qualify_stem` already
+/// makes it unique within a module for exactly this kind of identity
+/// comparison (two distinct methods never share (file, line, column) at all,
+/// so `symbol` is redundant in practice, but costs nothing and removes any
+/// doubt).
+type NodeKey = (String, u32, u32, String);
+
+fn node_key(f: &model::Function) -> NodeKey {
+    (f.file.clone(), f.line, f.column, f.symbol.clone())
+}
+
+/// Merges two full analysis passes — cfg(test) off (`prod`) and cfg(test) on
+/// (`test`) — into one node/edge set. This is the Family E fix itself: under
+/// the old single, permanently cfg(test)-on load, a `#[cfg(not(test))]` item
+/// was structurally absent from enumeration, so it and anything reachable
+/// only through it read as false dead code. Running both configs and taking
+/// the union closes that hole by construction — a node the OLD single load
+/// never saw now comes from `prod` instead.
+///
+/// **Merge design:**
+/// - **Identity**: `node_key` (file, line, column, symbol) — see its doc
+///   comment for why not an id from either pass.
+/// - **A node in only one config is emitted as-is.** This IS the defect's
+///   fix: under the old code such a node was silently absent, full stop.
+/// - **A node in both configs becomes ONE node, ONE id.** Structural fields
+///   (pkg, file, line, column, kind, exported, generated, signature, doc,
+///   trait_impl, symbol) come from whichever side is encountered first
+///   (`prod`, then `test`-only) — they describe the same source declaration
+///   either way, so which side "wins" is not a correctness question. `root`
+///   and `test` are OR'd across sides instead of taking either alone: both
+///   are booleans where a false negative is the dangerous direction (a
+///   dropped root hides a false-dead-code report; a dropped test flag
+///   launders test code into a production root — see `roots::mark`'s own
+///   doc comment), and OR is the only combinator that can never turn a true
+///   in either source into a false in the output — "every imprecision must
+///   fail toward live, never toward dead."
+/// - **Edges**: each side's local `Call`s are remapped from local id to
+///   global id via `node_key`, then re-aggregated per (from, to) with the
+///   SAME static-upgrades-dynamic rule `walk::edges` already applies within
+///   one pass — a pair seen as static in either config is real, so it must
+///   end up static in the merged graph too, not silently lose that fact by
+///   being aggregated separately per side.
+///
+/// Ids are assigned in prod-then-test-only order: every `prod` node keeps a
+/// low, stable id block, and cfg(test)-only nodes are appended after — an
+/// explainable, deterministic scheme, though the specific numbers are not a
+/// contract magma depends on (`id` was always assignment-order-dependent).
+fn merge_configs(prod: ConfigOutput, test: ConfigOutput) -> ConfigOutput {
+    let prod_id_to_key: HashMap<u32, NodeKey> =
+        prod.functions.iter().map(|f| (f.id, node_key(f))).collect();
+    let test_id_to_key: HashMap<u32, NodeKey> =
+        test.functions.iter().map(|f| (f.id, node_key(f))).collect();
+
+    let mut merged: HashMap<NodeKey, model::Function> = HashMap::new();
+    let mut order: Vec<NodeKey> = Vec::new();
+    for f in prod.functions {
+        let key = node_key(&f);
+        order.push(key.clone());
+        merged.insert(key, f);
+    }
+    for f in test.functions {
+        let key = node_key(&f);
+        match merged.get_mut(&key) {
+            Some(existing) => {
+                existing.root |= f.root;
+                existing.test |= f.test;
+            }
+            None => {
+                order.push(key.clone());
+                merged.insert(key, f);
             }
         }
-        eprintln!("MODE outgoing_calls");
-    } else {
-        // rust-analyzer's type inference requires the salsa DB attached to this
-        // thread. Analysis::with_db does this internally; using Semantics directly
-        // does not, and inference panics with "Try to use attached db, but not db
-        // is attached".
-        let init_call_count;
-        (calls, init_nodes, init_call_count) = ra_ap_hir::attach_db(db, || {
-            let sema = Semantics::new(db);
-            let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &funcs, &index);
-            // Family C: gives every const/static/associated-const
-            // initializer its own synthesized node (a real id in the
-            // `functions` array, never an invented/dangling one), then
-            // walks each initializer expression the same way a function
-            // body is walked, so a call made from one is no longer
-            // structurally invisible. See enumerate::collect_inits and
-            // walk::init_edges. `funcs.len()` continues the id space real
-            // functions already occupy.
-            let inits = enumerate::collect_inits(
-                db,
-                &sema,
-                &vfs,
-                root_abs.as_path(),
-                target_dir_abs.as_path(),
-                funcs.len() as u32,
-            );
-            let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &inits, &index);
-            let init_call_count = init_edges.len();
-            calls.extend(init_edges);
-            let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
-            (calls, init_nodes, init_call_count)
-        });
-        edges = calls.len();
-        eprintln!(
-            "MODE semantics+macro-descent ({} initializer nodes, {} initializer edges)",
-            init_nodes.len(),
-            init_call_count
-        );
     }
-    eprintln!("TIMING edges: {:.1}s for {} edges", t2.elapsed().as_secs_f64(), edges);
-    eprintln!("TIMING TOTAL: {:.1}s", t0.elapsed().as_secs_f64());
 
-    if !use_outgoing {
-        let mut functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
-        functions.extend(init_nodes);
-        let out = model::Output::new(executed_target_code, functions, calls);
-        println!("{}", serde_json::to_string_pretty(&out)?);
+    let mut key_to_global: HashMap<NodeKey, u32> = HashMap::new();
+    let mut functions: Vec<model::Function> = Vec::with_capacity(order.len());
+    for key in order {
+        if key_to_global.contains_key(&key) {
+            continue; // already assigned (both configs share a node — normal)
+        }
+        let global_id = functions.len() as u32;
+        key_to_global.insert(key.clone(), global_id);
+        let mut f = merged.remove(&key).expect("key was just inserted above");
+        f.id = global_id;
+        functions.push(f);
     }
+
+    let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
+    remap_and_aggregate(prod.calls, &prod_id_to_key, &key_to_global, &mut agg);
+    remap_and_aggregate(test.calls, &test_id_to_key, &key_to_global, &mut agg);
+
+    let mut calls: Vec<model::Call> = agg.into_values().collect();
+    calls.sort_by_key(|c| (c.from, c.to)); // deterministic output, matches walk::edges
+
+    ConfigOutput { functions, calls }
+}
+
+/// Remaps one config's local-id `Call`s into the merged global id space via
+/// `id_to_key`/`key_to_global`, aggregating into `agg` per (from, to) with
+/// the same static-upgrades-dynamic rule `walk::edges` applies within a
+/// single pass. An endpoint whose local id has no entry in `id_to_key` (or
+/// whose key has no merged global id — should not happen, since every node
+/// in `functions` was built from exactly these same per-config functions)
+/// is skipped defensively rather than panicking.
+fn remap_and_aggregate(
+    calls: Vec<model::Call>,
+    id_to_key: &HashMap<u32, NodeKey>,
+    key_to_global: &HashMap<NodeKey, u32>,
+    agg: &mut HashMap<(u32, u32), model::Call>,
+) {
+    for c in calls {
+        let Some(from_key) = id_to_key.get(&c.from) else { continue };
+        let Some(to_key) = id_to_key.get(&c.to) else { continue };
+        let Some(&from) = key_to_global.get(from_key) else { continue };
+        let Some(&to) = key_to_global.get(to_key) else { continue };
+        agg.entry((from, to))
+            .and_modify(|existing| {
+                if c.kind == "static" {
+                    existing.kind = "static".to_owned(); // static site upgrades the pair
+                }
+            })
+            .or_insert(model::Call {
+                from,
+                to,
+                site_file: c.site_file.clone(),
+                site_line: c.site_line,
+                kind: c.kind.clone(),
+            });
+    }
+}
+
+/// The pre-Family-E `--outgoing` debug/comparison mode: a single load, cfg(test)
+/// forced on, printing raw `EDGE` lines via `Analysis::outgoing_calls` instead
+/// of the JSON `Output` contract. Never emits `Output`/`functions`, not part
+/// of the wire contract, not exercised by the oracle harness — kept
+/// unchanged (still one config, not two) since Family E's fix is scoped to
+/// the real Output path this function does not touch.
+fn run_outgoing_mode(
+    root: &str,
+    root_abs: &AbsPathBuf,
+    target_dir_abs: &AbsPathBuf,
+    load_config: &LoadCargoConfig,
+) -> anyhow::Result<()> {
+    let mut cargo_config = CargoConfig::default();
+    cargo_config.sysroot = Some(RustLibSource::Discover);
+    cargo_config.cfg_overrides = CfgOverrides {
+        global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
+        selective: Default::default(),
+    };
+
+    let (db, vfs, _p) =
+        match load_workspace_at(Path::new(root), &cargo_config, load_config, &|_s| {}) {
+            Ok(v) => v,
+            Err(e) => {
+                let r = model::Refusal::new(
+                    false,
+                    format!("not a computable cargo workspace: {e:#}"),
+                );
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                std::process::exit(0);
+            }
+        };
+
+    let host = AnalysisHost::with_database(db);
+    let analysis = host.analysis();
+    let db = host.raw_database();
+
+    let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
+        let sema = Semantics::new(db);
+        let mut funcs =
+            enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
+        roots::mark(db, &mut funcs);
+        funcs
+    });
+
+    let cfg = CallHierarchyConfig { exclude_tests: false, ra_fixture: RaFixtureConfig::default() };
+    let mut edges = 0usize;
+    for (mf, f) in &funcs {
+        let Some(pos) = pos_of(db, *f) else { continue };
+        if let Ok(Some(items)) = analysis.outgoing_calls(&cfg, pos) {
+            for it in &items {
+                println!("EDGE\t{}\t{}", mf.symbol, it.target.name);
+            }
+            edges += items.len();
+        }
+    }
+    eprintln!("MODE outgoing_calls ({edges} edges)");
     Ok(())
 }
 

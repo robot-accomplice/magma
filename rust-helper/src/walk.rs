@@ -4,8 +4,10 @@
 use std::collections::HashMap;
 
 use ra_ap_hir::{
-    AsAssocItem, AssocItem, AssocItemContainer, HasSource, Impl, PathResolution, Semantics, Trait,
+    AsAssocItem, AssocItem, AssocItemContainer, Crate, HasSource, Impl, ModuleDef,
+    PathResolution, ScopeDef, Semantics, Trait,
 };
+use ra_ap_ide_db::base_db::{CrateOrigin, LangCrateOrigin};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_paths::AbsPath;
 use ra_ap_syntax::{ast, AstNode, SyntaxNode};
@@ -26,9 +28,9 @@ struct Site {
 /// Deduplicated edges, aggregated per (from, to). A pair seen at both a static
 /// and a dynamic site is recorded as "static" — matching Go, where any static
 /// call site upgrades the pair.
-pub fn edges(
-    sema: &Semantics<'_, RootDatabase>,
-    db: &RootDatabase,
+pub fn edges<'db>(
+    sema: &Semantics<'db, RootDatabase>,
+    db: &'db RootDatabase,
     vfs: &Vfs,
     root: &AbsPath,
     funcs: &[(model::Function, ra_ap_hir::Function)],
@@ -259,7 +261,164 @@ fn walk(
                 push_resolved(sema, &n, f, out, db, vfs, root);
             }
         }
+        // `println!("{}", w)` / `{:?}` -> `Display::fmt` / `Debug::fmt`. This
+        // is NOT a syntactic method call even after macro expansion: the
+        // `format_args!` builtin macro (confirmed by dumping its expanded
+        // tree — see the Task B report) lowers straight to a
+        // `FORMAT_ARGS_EXPR` node whose per-argument children are
+        // `FormatArgsArg`, never a `CallExpr`/`MethodCallExpr` naming
+        // `fmt` — the trait dispatch happens inside the format-args
+        // machinery's internals, invisible to this syntax walk. No
+        // `Semantics::resolve_*` exists for it at this pinned version, so
+        // this resolves it the same way `resolve_bin_expr` et al. do
+        // internally: from the argument's own type, not the (`{}` vs
+        // `{:?}`) format spec text. Deliberately checks BOTH Display and
+        // Debug impls for the argument's type regardless of which spec was
+        // actually written — over-approximating is the safe direction
+        // (§Non-negotiable: fails toward live), and parsing the spec to
+        // pick exactly one would only ever narrow, never fix, a missed edge.
+        if let Some(fargs) = ast::FormatArgsExpr::cast(n.clone()) {
+            for arg in fargs.syntax().children().filter_map(ast::FormatArgsArg::cast) {
+                let Some(arg_expr) = arg.expr() else { continue };
+                let Some(ty) = sema.type_of_expr(&arg_expr).map(|info| info.original) else {
+                    continue;
+                };
+                for trait_ in
+                    [core_trait(db, &["fmt"], "Display"), core_trait(db, &["fmt"], "Debug")]
+                        .into_iter()
+                        .flatten()
+                {
+                    push_trait_method_edges(sema, &n, &ty, trait_, "fmt", out, db, vfs, root);
+                }
+            }
+        }
+        // `for x in it { .. }` -> `IntoIterator::into_iter(it)`, then
+        // `Iterator::next(&mut <result>)` each iteration. Like format args,
+        // this is HIR-level desugaring with no corresponding syntax for
+        // `Semantics::resolve_*` to key off (`ForExpr` lowers straight to a
+        // `match`/`loop` in `hir_def::body::lower` with no surface call
+        // node), so this resolves both trait methods from the iterable's own
+        // type the same way format args resolves `fmt` — by matching impls
+        // to the concrete `Adt`, not by proving inference chose them. The
+        // `IntoIter` associated type is looked up via
+        // `normalize_trait_assoc_type` (the same API `resolve_await_to_poll`
+        // above uses for `IntoFuture`'s associated type) so `Iterator::next`
+        // is matched against the actual iterator type, not the iterable
+        // itself — the two differ whenever `IntoIterator` isn't its own
+        // `Iterator` (e.g. `Vec<T>` iterates via `std::vec::IntoIter<T>`,
+        // never `Vec<T>` itself). Falls back to the iterable's own type when
+        // the associated type can't be normalised (covers `impl Iterator`
+        // types reached only through the core blanket `impl<I: Iterator>
+        // IntoIterator for I`, where `IntoIter = Self` trivially).
+        if let Some(for_expr) = ast::ForExpr::cast(n.clone()) {
+            if let Some(iterable) = for_expr.iterable() {
+                if let Some(src_ty) = sema.type_of_expr(&iterable).map(|info| info.original) {
+                    if let Some(into_iter_trait) =
+                        core_trait(db, &["iter", "traits", "collect"], "IntoIterator")
+                    {
+                        push_trait_method_edges(
+                            sema,
+                            &n,
+                            &src_ty,
+                            into_iter_trait,
+                            "into_iter",
+                            out,
+                            db,
+                            vfs,
+                            root,
+                        );
+                        let into_iter_alias =
+                            into_iter_trait.items(db).into_iter().find_map(|item| match item {
+                                AssocItem::TypeAlias(alias)
+                                    if alias.name(db).as_str() == "IntoIter" =>
+                                {
+                                    Some(alias)
+                                }
+                                _ => None,
+                            });
+                        let iter_ty = into_iter_alias
+                            .and_then(|alias| src_ty.normalize_trait_assoc_type(db, &[], alias))
+                            .unwrap_or(src_ty);
+                        if let Some(iterator_trait) =
+                            core_trait(db, &["iter", "traits", "iterator"], "Iterator")
+                        {
+                            push_trait_method_edges(
+                                sema,
+                                &n,
+                                &iter_ty,
+                                iterator_trait,
+                                "next",
+                                out,
+                                db,
+                                vfs,
+                                root,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Emits a dynamic edge to `trait_`'s `method_name` for whichever impl's self
+/// type matches `ty`'s own `Adt` — the same "match impls of a trait by self
+/// type" shape `push_resolved`'s trait-container branch and `roots.rs`'s
+/// `is_public_method` both already use, generalised for the manual
+/// (non-inference-driven) trait-method lookups format args and `for`-loop
+/// desugaring both need. A non-`Adt` `ty` (a generic type parameter still
+/// unresolved at this call site, a primitive, or a foreign type with no
+/// local impl to find anyway) yields no edge — a missed edge, not a
+/// false-dead one: the safe direction.
+fn push_trait_method_edges<'db>(
+    sema: &Semantics<'db, RootDatabase>,
+    n: &SyntaxNode,
+    ty: &ra_ap_hir::Type<'db>,
+    trait_: Trait,
+    method_name: &str,
+    out: &mut Vec<Site>,
+    db: &RootDatabase,
+    vfs: &Vfs,
+    root: &AbsPath,
+) {
+    let Some(adt) = ty.as_adt() else { return };
+    for imp in Impl::all_for_trait(db, trait_) {
+        if imp.self_ty(db).as_adt() != Some(adt) {
+            continue;
+        }
+        for item in imp.items(db) {
+            if let AssocItem::Function(f) = item {
+                if f.name(db).as_str() == method_name {
+                    out.push(site(sema, n, f, true, db, vfs, root));
+                }
+            }
+        }
+    }
+}
+
+/// Locates a trait declared somewhere under `core::<path>` via a direct
+/// crate-graph walk — NOT a name resolution against the workspace's own
+/// `use` statements (`sema.resolve_path` et al.), which would revive exactly
+/// the accidental, import-position-dependent root marking the plan's trap
+/// note warns about. `testdata/desugar` deliberately has no `use` statement
+/// anywhere for this reason; this lookup must not depend on one either.
+fn core_trait(db: &RootDatabase, path: &[&str], name: &str) -> Option<Trait> {
+    let core = Crate::all(db)
+        .into_iter()
+        .find(|k| matches!(k.origin(db), CrateOrigin::Lang(LangCrateOrigin::Core)))?;
+    let mut module = core.root_module(db);
+    for seg in path {
+        module = module.children(db).find(|m| m.name(db).is_some_and(|n| n.as_str() == *seg))?;
+    }
+    module.scope(db, None).into_iter().find_map(|(item_name, def)| {
+        if item_name.as_str() != name {
+            return None;
+        }
+        match def {
+            ScopeDef::ModuleDef(ModuleDef::Trait(t)) => Some(t),
+            _ => None,
+        }
+    })
 }
 
 /// Given a function resolved via any dispatch path — a syntactic method
