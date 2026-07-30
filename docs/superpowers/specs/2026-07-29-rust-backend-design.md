@@ -444,14 +444,20 @@ it needs stating precisely, because it holds for different reasons at different 
 - **Re-runs are free, in every language.** Freshness-skip means an unchanged clean tree at the same
   SHA does no analysis at all. This is the case that actually recurs in a working session.
 - **First-run cost varies by language, and substantially.** Go analyses a ~575k-line repo in ~15s.
-  Rust analyses a comparable repo in ~5 minutes — roughly 20× slower per function — because
-  rust-analyzer performs full type inference and macro expansion where Go's RTA does not, and
-  because Rust requires loading a sysroot and executing build scripts that Go has no analogue for.
+  Rust analyses a comparable repo in **roughly 2–5 minutes** — because rust-analyzer performs full
+  type inference and macro expansion where Go's RTA does not, and because Rust requires executing
+  build scripts that Go has no analogue for.
+- **The cost is in the analysis, not in overhead.** Measured phase breakdown on a 575k-line
+  workspace: workspace load ~2s, enumeration ~15–19s, **edge extraction 115–251s**. Edge extraction
+  dominates, and that is genuine work — resolving the calls that make the graph correct. There is no
+  large fixed overhead to optimise away. (An earlier revision of this section claimed a ~80s fixed
+  sysroot cost; that was a misattribution — the isolated sysroot cost is 0–6s and the observed 80s
+  was one-time cold-cache build-script recompilation. See research doc §9a.)
 - **First-run cost also varies by project, within a language.** It scales with function and edge
   count, not line count, so a macro-heavy or generic-heavy crate costs more than its size suggests.
-  A fixed sysroot overhead (~80s at time of writing, tracked as Task 14 in the helper plan)
-  dominates on *small* Rust projects, making them proportionally the worst case rather than the
-  best.
+- **Timings on a busy machine are not measurements.** Byte-identical input on back-to-back runs
+  produced 131.9s and 273.6s — a 2.1× spread from CPU contention. Any performance figure quoted here
+  must come from repeated runs on an otherwise-idle machine, or it is a sample, not a number.
 
 **What magma should promise, and what it should not.** It should not promise a wall-clock number.
 It should promise that (a) re-running is free, (b) the first run's cost is bounded and reported,
