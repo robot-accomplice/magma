@@ -1,23 +1,33 @@
 # Rust helper — Phase B handover
 
-**Written 2026-07-30 at `df8cba4`, branch `feat/rust-helper-extraction` (46 commits ahead of
-`develop`, tree clean, all tests green).**
+**Originally written 2026-07-30 at `df8cba4`. Phase B is now IN PROGRESS — read
+"Phase B progress" at the end of this document for current state before acting on anything here.**
 
 Read this with `docs/superpowers/plans/2026-07-29-rust-helper.md` — specifically its final section,
 "Plan A outcome: DO NOT SHIP", which is the authoritative finding list. This document is the
-operating brief for the next session, not a duplicate of it.
+operating brief, not a duplicate of it.
+
+> **⚠ Sections below dated to `df8cba4` describe the state BEFORE Phase B.** The instrument is now
+> repaired and families A and C are closed. Where this document and the "Phase B progress" section
+> disagree, **the progress section wins.** Two specific claims below are superseded: that the
+> harness is sound (it had two false-green paths, now fixed), and the instruction not to wire it
+> (the user directed "fix it" — wiring happens after families A–F close, not never).
 
 ---
 
 ## The one-paragraph version
 
-Plan A (17 tasks) built a rust-analyzer-driven helper and a genuinely good oracle harness. The
-harness is sound. The **extraction is not**: on a twelve-line idiomatic Rust program the helper
-emits five functions and **zero** call edges, so magma would report four dead functions where
-rustc reports one. Six independent false-dead-code families are confirmed and reproduced. The
-branch's own gate is green only because no fixture exercises any of those shapes. Nothing consumes
-the helper yet — Rust repos still refuse — so no user is exposed. **Do not merge as a working Rust
-backend, do not wire it, and do not soften the "Rust is in development" language.**
+Plan A (17 tasks) built a rust-analyzer-driven helper and an oracle harness whose **gate** is
+excellent but whose **oracle pipeline** had two critical false-green paths — it would report green
+having measured nothing. The **extraction was unsound**: on a twelve-line idiomatic Rust program
+the helper emitted five functions and **zero** call edges, so magma would have reported four dead
+functions where rustc reports one. Six independent false-dead-code families were confirmed and
+reproduced; the gate was green only because no fixture exercised any of those shapes. Nothing
+consumes the helper — Rust repos still refuse — so no user was ever exposed.
+
+**Phase B is fixing all of it before anything is wired.** The instrument is repaired and verified,
+families A and C are closed, and all five contract defects are fixed. B, D, E remain; F needs a
+different kind of check. Do not soften the "Rust is in development" line until they close.
 
 ---
 
