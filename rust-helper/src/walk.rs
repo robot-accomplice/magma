@@ -17,6 +17,40 @@ use crate::enumerate;
 use crate::enumerate::InitSource;
 use crate::model;
 
+/// Family D: how many nested macro-expansion boundaries `walk` will descend
+/// through before giving up. Was a bare `8` with no evidence behind it and no
+/// disclosure when hit — every callee past the guard silently vanished from
+/// the graph, indistinguishable from a callee that was never there.
+///
+/// Measured (not guessed) against real macro shapes, via a throwaway probe
+/// crate pinning actual `serde_json`, `tracing`, `tokio`, `bitflags`,
+/// `lazy_static` from the local registry cache and reading the depth at
+/// which each resolved a real function call inside its expansion:
+///   - `println!("{}", f())` — depth 2 (`println!` -> `format_args_nl!`).
+///   - `tokio::select! { _ = async { f() } => {} }` — depth 5.
+///   - `tracing::info!(x = f(), "..")` — depth 6.
+///   - `serde_json::json!({ "k1": f(), "k2": f(), ... })` — a tt-muncher that
+///     costs ~3 levels of depth PER KEY: depths 6, 9, 12, 15, 18 for keys
+///     1..5 in one run. This shape is open-ended by construction (each
+///     additional key costs 3 more levels), so no finite limit makes it
+///     unconditionally safe — see the disclosure below, which is why this
+///     defect is fixed by disclosure first and a raised limit second, not
+///     the limit alone.
+///
+/// 64 clears every measured real-macro shape above with headroom (a
+/// `json!` object would need >20 keys to exhaust it — none of the fixtures
+/// or workspaces this branch has touched come close), while remaining a
+/// small, bounded number of syntax-tree recursion frames — cheap to walk
+/// even when actually reached (see `Function::macro_truncated`'s doc comment
+/// for what a consumer must do when it IS reached) — rather than removing
+/// the guard, which the plan's own non-negotiables warn against doing
+/// without justifying it against genuinely runaway/adversarial recursive
+/// `macro_rules!` expansion. Never treat this constant as "the fix" on its
+/// own: it only moves the truncation point further out. The Family D fix
+/// checked in alongside it is what makes truncation observable when it
+/// still happens, which a numeric limit — of any size — never can.
+const MACRO_DEPTH_LIMIT: usize = 64;
+
 /// One resolved call site before aggregation.
 struct Site {
     to: ra_ap_hir::Function,
@@ -33,12 +67,12 @@ pub fn edges<'db>(
     db: &'db RootDatabase,
     vfs: &Vfs,
     root: &AbsPath,
-    funcs: &[(model::Function, ra_ap_hir::Function)],
+    funcs: &mut [(model::Function, ra_ap_hir::Function)],
     index: &HashMap<ra_ap_hir::Function, u32>,
 ) -> Vec<model::Call> {
     let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
 
-    for (node, f) in funcs {
+    for (node, f) in funcs.iter_mut() {
         let Some(src) = f.source(db) else { continue };
         // Cache this function's tree into `sema` before touching its body:
         // parse_or_expand handles a real file and a macro file uniformly, so
@@ -50,7 +84,18 @@ pub fn edges<'db>(
         let Some(body) = src.value.body() else { continue };
 
         let mut sites = Vec::new();
-        walk(sema, body.syntax(), &mut sites, 0, db, vfs, root);
+        // Family D: `truncated` is threaded through every recursive `walk`
+        // call for this function's body and set once, deep inside, the
+        // moment the guard fires — see `walk`'s own `depth >
+        // MACRO_DEPTH_LIMIT` branch. Recorded directly on the node itself
+        // (not just returned) so the disclosure survives into `functions`
+        // without needing edges() to hand back a second, easy-to-drop
+        // channel of its own.
+        let mut truncated = false;
+        walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated);
+        if truncated {
+            node.macro_truncated = true;
+        }
 
         for s in sites {
             let Some(&to) = index.get(&s.to) else { continue }; // out of workspace
@@ -96,26 +141,30 @@ pub fn init_edges<'db>(
     db: &'db RootDatabase,
     vfs: &Vfs,
     root: &AbsPath,
-    inits: &[(model::Function, InitSource)],
+    inits: &mut [(model::Function, InitSource)],
     index: &HashMap<ra_ap_hir::Function, u32>,
 ) -> Vec<model::Call> {
     let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
 
-    for (node, src) in inits {
+    for (node, src) in inits.iter_mut() {
         let mut sites = Vec::new();
+        let mut truncated = false; // Family D — see edges()'s identical comment
         match src {
             InitSource::Const(c) => {
                 let Some(csrc) = c.source(db) else { continue };
                 let _ = sema.parse_or_expand(csrc.file_id);
                 let Some(body) = csrc.value.body() else { continue };
-                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root);
+                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated);
             }
             InitSource::Static(s) => {
                 let Some(ssrc) = s.source(db) else { continue };
                 let _ = sema.parse_or_expand(ssrc.file_id);
                 let Some(body) = ssrc.value.body() else { continue };
-                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root);
+                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated);
             }
+        }
+        if truncated {
+            node.macro_truncated = true;
         }
 
         for s in sites {
@@ -150,14 +199,25 @@ fn walk<'db>(
     db: &'db RootDatabase,
     vfs: &Vfs,
     root: &AbsPath,
+    truncated: &mut bool,
 ) {
-    if depth > 8 {
-        return; // guard against pathological macro recursion
+    if depth > MACRO_DEPTH_LIMIT {
+        // Family D: this used to be silent — an expansion cut off here is
+        // indistinguishable, from the caller's side, from one that simply
+        // had no more calls in it. Setting `*truncated` is the entire fix:
+        // it survives back up through every recursive frame that called
+        // this one (see edges()/init_edges(), which record it on the
+        // originating node) all the way to `Function::macro_truncated` in
+        // the emitted JSON. Still a guard against pathological/adversarial
+        // macro recursion (see MACRO_DEPTH_LIMIT's doc comment) — raising it
+        // moves the truncation point, it does not remove the need for one.
+        *truncated = true;
+        return;
     }
     for n in node.descendants() {
         if let Some(mc) = ast::MacroCall::cast(n.clone()) {
             if let Some(exp) = sema.expand_macro_call(&mc) {
-                walk(sema, &exp.value, out, depth + 1, db, vfs, root);
+                walk(sema, &exp.value, out, depth + 1, db, vfs, root, truncated);
             }
         }
         if let Some(call) = ast::CallExpr::cast(n.clone()) {

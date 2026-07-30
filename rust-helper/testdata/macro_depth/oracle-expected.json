@@ -1,40 +1,20 @@
 {
-  "adjudication": "open-defect-awaiting-phase-b-fix",
-  "fatal": [
-    {
-      "symbol": "base_case",
-      "pkg": "macro_depth",
-      "file": "src/main.rs",
-      "line": 17,
-      "column": 4,
-      "status": "open-defect",
-      "reason": "OPEN DEFECT (Plan A outcome, Family D) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `base_case` is reached only after 9 nested `macro_rules!` tt-muncher expansion levels (`count_down!(a b c d e f g h i j)`, one token consumed per recursive expansion). walk.rs's macro descent silently gives up once its `depth` counter exceeds 8 (`if depth > 8 { return; }`, walk.rs:85, no counter emitted, no disclosure), which truncates the walk one level before the base-case call is ever reached -- verified directly by a control fixture using the identical macro with only 2 tokens, which DOES resolve the edge (1 edge, not 0), isolating depth as the cause rather than any other property of the macro shape. rustc fully expands the macro (its own recursion limit is far higher) and emits no dead_code warning for `base_case`. Fix tracked for Phase B (the depth-8 guard needs raising and/or the truncation needs disclosing rather than silently dropping edges); not suppressed or excluded here."
-    }
-  ],
+  "adjudication": "fixed-family-d-macro-depth-guard",
+  "fatal": [],
   "summary": {
     "considered": 2,
     "excluded": 0,
     "agree_dead": 0,
-    "agree_live": 1,
-    "fatal": 1
+    "agree_live": 2,
+    "fatal": 0
   },
   "executed_target_code": true,
-  "fatal_test": [
-    {
-      "symbol": "base_case",
-      "pkg": "macro_depth",
-      "file": "src/main.rs",
-      "line": 17,
-      "column": 4,
-      "status": "open-defect",
-      "reason": "H5 (test-config direction): same OPEN DEFECT as the plain-config entry above, reproduced identically under the test-profile oracle. The macro nesting and walk.rs's depth-8 truncation are unrelated to cfg(test) -- this fixture has no test/bench entry point, so the all-roots seed equals the production-roots set and the helper's truncated walk still never reaches base_case. rustc's test-profile compile fully expands the same macro nesting and emits no dead_code warning for base_case, matching the plain-config oracle. Same root cause, same fix tracked for Phase B; not suppressed or excluded here."
-    }
-  ],
+  "fatal_test": [],
   "summary_test": {
     "considered": 2,
     "excluded": 0,
     "agree_dead": 0,
-    "agree_live": 1,
-    "fatal": 1
+    "agree_live": 2,
+    "fatal": 0
   }
 }
