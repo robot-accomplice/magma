@@ -84,12 +84,41 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== running helper on $REPO_ABS ==" >&2
+# H6: the helper's documented no-roots refusal exits 2. Under `set -e`, a
+# direct (non-subshell, non-conditional) invocation that exits non-zero
+# kills the script right here, before the `.computable == false` check
+# below ever runs — so the dedicated rc-3 refusal path was unreachable and
+# a refusal instead surfaced as an unexplained script abort. `set +e`
+# around just this invocation lets the exit code be inspected explicitly.
+set +e
 "$HELPER" "$REPO_ABS" >"$WORK/helper.json" 2>"$WORK/helper.stderr"
+helper_rc=$?
+set -e
 cat "$WORK/helper.stderr" >&2
 
 if jq -e '.computable == false' "$WORK/helper.json" >/dev/null 2>&1; then
   echo "helper refused: $(jq -r '.reason' "$WORK/helper.json")"
   exit 3
+fi
+
+if [[ $helper_rc -ne 0 ]]; then
+  echo "" >&2
+  echo "error: helper exited $helper_rc without a computable:false refusal envelope —" >&2
+  echo "an unexpected failure (crash, panic, bad args), not a documented refusal." >&2
+  exit 1
+fi
+
+# H8: executed_target_code was emitted but nothing ever checked it. If build
+# scripts didn't run and/or the proc-macro server didn't expand macros, any
+# node or edge sourced from that generated code is unverified this run — a
+# silent gap this harness's whole job is to surface, not absorb.
+if ! jq -e '.executed_target_code == true' "$WORK/helper.json" >/dev/null 2>&1; then
+  echo "" >&2
+  echo "REFUSED: helper reports executed_target_code=false — build scripts did not run" >&2
+  echo "and/or the proc-macro server did not expand macros this run. Any dead_code" >&2
+  echo "claim touching macro- or build-script-generated code is unverifiable, so this" >&2
+  echo "comparison cannot be trusted." >&2
+  exit 8
 fi
 
 echo "== running oracle (cargo check) on $REPO_ABS ==" >&2
@@ -98,9 +127,41 @@ echo "== running oracle (cargo check) on $REPO_ABS ==" >&2
 # stream on stdout. This is the ONLY reliable signal for "did rustc actually
 # run for this crate this invocation" — message-format=json output cannot
 # tell you that (see the freshness check below for why).
-( cd "$REPO_ABS" && cargo check --workspace -v --message-format=json 2>"$WORK/cargo.stderr" ) \
-  > "$WORK/cargo.jsonl" || true
+# --all-targets (H4): plain `cargo check --workspace` compiles only default
+# targets (lib/bin), skipping examples/, tests/, benches/ — but the helper
+# enumerates functions from ALL of them. That mismatch produced both false
+# FATALs (helper enumerates a fn in an example the oracle never compiled, so
+# it can never appear in oracle-dead.jsonl) and fake agree_live (same fn,
+# reachable/dead status never actually verified by rustc). --all-targets
+# closes the gap by widening the oracle to match the helper's enumeration
+# scope, rather than narrowing the comparison with a new exclusion.
+set +e
+( cd "$REPO_ABS" && cargo check --workspace --all-targets -v --message-format=json 2>"$WORK/cargo.stderr" ) \
+  > "$WORK/cargo.jsonl"
+cargo_rc=$?
+set -e
 tail -20 "$WORK/cargo.stderr" >&2 || true
+
+# H2: the oracle's own exit status used to be discarded (`|| true`), and
+# nothing examined whether cargo check actually completed. rustc aborts
+# before the dead_code lint pass runs at all on a type/compile error, so a
+# non-compiling crate emits ZERO dead_code diagnostics — every enumerated
+# function would then be booked agree_live, a false green for the one tool
+# whose job is measuring parity, not manufacturing it. Refuse unless cargo
+# check both exited zero AND emitted no `level:"error"` compiler-message
+# (belt-and-suspenders: some configurations can report errors without a
+# nonzero process exit).
+cargo_error_count="$(jq -r 'select(.reason=="compiler-message") | select(.message.level=="error") | 1' \
+  "$WORK/cargo.jsonl" 2>/dev/null | wc -l | tr -d ' ')"
+if [[ $cargo_rc -ne 0 || "${cargo_error_count:-0}" -gt 0 ]]; then
+  echo "" >&2
+  echo "REFUSED: cargo check did not complete cleanly (exit $cargo_rc, ${cargo_error_count:-0}" >&2
+  echo "error diagnostic(s)). rustc aborts before the dead_code lint pass on a compile" >&2
+  echo "error, so a non-compiling crate emits ZERO dead_code diagnostics and every" >&2
+  echo "enumerated function would be booked agree_live — a false green for the tool" >&2
+  echo "whose job is measuring parity, not manufacturing it." >&2
+  exit 6
+fi
 
 # A crate cargo considers "Fresh" (fingerprint unchanged since the last
 # check) is never handed to rustc at all this invocation — cargo just
@@ -154,7 +215,38 @@ if [[ -n "$stale_packages" ]]; then
   echo "to tens of minutes. That cost is the price of a trustworthy oracle." >&2
   exit 5
 fi
-echo "oracle: all $(wc -l <<<"$workspace_packages" | tr -d ' ') workspace-local crate(s) actually recompiled this run — proceeding" >&2
+# `wc -l <<<""` reports 1, not 0 (the heredoc still supplies one trailing
+# newline for an empty string) — counting non-empty lines directly avoids
+# misreporting "1 workspace-local crate" when there are none.
+workspace_package_count="$(grep -c . <<<"$workspace_packages" || true)"
+echo "oracle: all ${workspace_package_count:-0} workspace-local crate(s) actually recompiled this run — proceeding" >&2
+
+# H7: a crate-level `#![allow(dead_code)]` or `#![allow(unused)]` silences
+# rustc's dead_code lint for the ENTIRE crate. The FATAL direction still
+# fails safe (a genuinely-dead function the helper flags just has no oracle
+# diagnostic to agree with, so it surfaces as a spurious FATAL rather than a
+# silent false green), but report_only collapses to nothing and agree_live
+# is manufactured from an oracle that was told to say nothing at all — not
+# real parity evidence. This does NOT exclude anything (that would repeat
+# the exact mistake H1 exists to fix); it only discloses the fact loudly so
+# a reader of this crate's report knows what its counts do and don't prove.
+echo "== scanning for crate-level dead_code suppression ==" >&2
+crate_level_allow="$(cd "$REPO_ABS" && cargo metadata --no-deps --format-version=1 2>/dev/null \
+  | jq -r '.packages[].targets[] | select(.kind[] as $k | $k=="lib" or $k=="bin") | .src_path' \
+  | sort -u \
+  | while IFS= read -r src; do
+      if [[ -f "$src" ]] && grep -qE '^[[:space:]]*#!\[[[:space:]]*allow\([^)]*(dead_code|unused)' "$src"; then
+        echo "$src"
+      fi
+    done)"
+if [[ -n "$crate_level_allow" ]]; then
+  echo "" >&2
+  echo "DISCLOSURE: crate-level #![allow(dead_code)] or #![allow(unused)] found. The" >&2
+  echo "oracle's dead_code lint is suppressed for the WHOLE crate, so report_only/" >&2
+  echo "agree_live counts touching it are not independent evidence of parity — only" >&2
+  echo "that the oracle was told to say nothing. FATAL still fires normally." >&2
+  echo "$crate_level_allow" | sed 's/^/    /' >&2
+fi
 
 # Oracle dead set, keyed by "file:line:column" of each dead_code diagnostic's
 # primary span — column, not just line, because two distinct declarations can
@@ -219,8 +311,17 @@ while IFS=$'\t' read -r id file line; do
   i=$((line - 2)) # 0-based index of the source line just above the fn line
   while (( i >= 0 )); do
     l="${lines[$i]:-}"
-    if [[ "$l" =~ ^[[:space:]]*(#\[|///|//!) ]]; then
+    # H3: a doc comment is walked PAST (so an attribute sitting above a run
+    # of doc comments is still found) but never admitted into `attrs` — the
+    # prior version matched `///`/`//!` into the same bucket as `#[...]`,
+    # so a doc comment merely MENTIONING e.g. "#[allow(dead_code)]" in
+    # English prose silently excluded that function from both comparison
+    # directions.
+    if [[ "$l" =~ ^[[:space:]]*#\[ ]]; then
       attrs="$l"$'\n'"$attrs"
+      i=$((i - 1))
+      continue
+    elif [[ "$l" =~ ^[[:space:]]*(///|//!) ]]; then
       i=$((i - 1))
       continue
     fi
@@ -229,6 +330,11 @@ while IFS=$'\t' read -r id file line; do
   reason=""
   if [[ "$attrs" =~ \#\[[[:space:]]*allow\([^\)]*dead_code ]]; then
     reason="allow(dead_code)"
+  elif [[ "$attrs" =~ \#\[[[:space:]]*allow\([^\)]*unused ]]; then
+    # H7: `#[allow(unused)]` is the lint GROUP containing dead_code (a
+    # narrower `#[allow(dead_code)]` is also still matched above), and was
+    # missing from this list entirely.
+    reason="allow(unused)"
   elif [[ "$attrs" =~ \#\[[[:space:]]*no_mangle ]]; then
     reason="no_mangle"
   elif [[ "$attrs" =~ \#\[[[:space:]]*used ]]; then
@@ -275,6 +381,43 @@ echo "A propagated false-dead-code effect (a live enumerated function whose only
 echo "caller is one of these invisible functions) IS still caught as a normal" >&2
 echo "FATAL entry for that caller; what's uncovered is the invisible function's" >&2
 echo "own status and untested chained-invisibility cases." >&2
+
+# H1 (second half): `considered == 0` (or a near-total exclusion) means
+# nothing was actually compared, yet nothing previously guarded against
+# reporting that as a clean, exit-0 run — comparing nothing is not evidence
+# of agreement. Checked before the FATAL check so a vacuous run refuses
+# instead of quietly "passing" with fatal:0.
+considered_count="$(grep -o '"considered":[0-9]*' "$WORK/report.txt" | grep -o '[0-9]*$')"
+excluded_count="$(grep -o '"excluded":[0-9]*' "$WORK/report.txt" | grep -o '[0-9]*$')"
+total_count="$(grep -o '"total_functions":[0-9]*' "$WORK/report.txt" | grep -o '[0-9]*$')"
+
+if [[ "${considered_count:-0}" -eq 0 ]]; then
+  echo "" >&2
+  echo "REFUSED: zero functions were considered in this comparison (excluded:" >&2
+  echo "${excluded_count:-0} of ${total_count:-0} — see the normalisation-exclusions" >&2
+  echo "breakdown above for why). A comparison against nothing is not evidence of" >&2
+  echo "agreement." >&2
+  exit 7
+fi
+
+# "Implausibly high": no fixture or real workspace observed on this branch
+# exceeds a small fraction excluded (see testdata/*/oracle-expected.json
+# summaries). A run this lopsided is far more likely to indicate an
+# over-broad exclusion heuristic (H1's own root cause) than a genuinely
+# generated-code-heavy crate, so it is refused rather than reported as
+# agreement.
+if [[ "${total_count:-0}" -gt 0 ]]; then
+  excluded_pct=$(( excluded_count * 100 / total_count ))
+  if [[ "$excluded_pct" -ge 90 ]]; then
+    echo "" >&2
+    echo "REFUSED: ${excluded_pct}% of enumerated functions (${excluded_count} of" >&2
+    echo "${total_count}) were excluded from comparison — implausibly high. This" >&2
+    echo "measuring instrument exists to catch a normalisation heuristic that" >&2
+    echo "over-excludes; a run this lopsided is refused rather than reported as" >&2
+    echo "agreement." >&2
+    exit 7
+  fi
+fi
 
 fatal_count="$(grep -o '"fatal":[0-9]*' "$WORK/report.txt" | grep -o '[0-9]*$')"
 if [[ "${fatal_count:-0}" -gt 0 ]]; then

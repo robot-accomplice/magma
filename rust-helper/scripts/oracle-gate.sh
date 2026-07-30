@@ -106,6 +106,19 @@ if ! jq -e '(.summary // {}) as $s
   exit 1
 fi
 
+# H8: executed_target_code must be pinned true in every baseline. The
+# harness now hard-refuses (oracle-diff.sh exit 8) whenever the helper
+# reports executed_target_code=false, so a baseline reaching this point
+# always corresponds to a run where it was true — a baseline that doesn't
+# declare that invariant, or declares it false, is stale or wrong.
+if ! jq -e '.executed_target_code == true' "$BASELINE" >/dev/null 2>&1; then
+  echo "error: baseline $BASELINE does not pin \"executed_target_code\": true (Task H8)." >&2
+  echo "oracle-diff.sh refuses (exit 8) whenever the helper reports" >&2
+  echo "executed_target_code=false, so every baseline must declare the invariant" >&2
+  echo "it depends on." >&2
+  exit 1
+fi
+
 echo "== running oracle-diff.sh on $REPO_ABS ==" >&2
 OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
@@ -115,10 +128,12 @@ rc=$?
 set -e
 
 # oracle-diff.sh's own refusal codes (helper refused to compute: 3; stale
-# cache, not actually recompiled: 5) are not "FATAL count" outcomes at all —
-# there is nothing to diff a baseline against, so propagate them unchanged
-# rather than trying to interpret them as a FATAL-set mismatch.
-if [[ $rc -eq 3 || $rc -eq 5 ]]; then
+# cache, not actually recompiled: 5; oracle/cargo check did not complete
+# cleanly: 6; nothing considered or an implausible exclusion fraction: 7;
+# executed_target_code false: 8 — Task H) are not "FATAL count" outcomes at
+# all — there is nothing to diff a baseline against, so propagate them
+# unchanged rather than trying to interpret them as a FATAL-set mismatch.
+if [[ $rc -eq 3 || $rc -eq 5 || $rc -eq 6 || $rc -eq 7 || $rc -eq 8 ]]; then
   echo "" >&2
   echo "oracle-diff.sh's own output:" >&2
   cat "$OUT" >&2

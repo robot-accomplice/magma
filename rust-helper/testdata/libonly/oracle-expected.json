@@ -23,5 +23,6 @@
     "agree_dead": 5,
     "agree_live": 10,
     "fatal": 2
-  }
+  },
+  "executed_target_code": true
 }
