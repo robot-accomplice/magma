@@ -246,6 +246,10 @@ fn push_const(
                     .as_path()
                     .map(|p| p.starts_with(target_dir))
                     .unwrap_or(false),
+            // Family D: never truncated at construction time -- walk.rs sets
+            // this true later, in place, only if its macro-depth guard fires
+            // while walking THIS node's own initializer expression.
+            macro_truncated: false,
             signature: model::Signature { params: Vec::new(), results },
             doc: c.hir_docs(db).map(|d| first_sentence(d.docs())),
             // Never an assoc item of a *trait impl* method -- `trait_impl`
@@ -325,6 +329,8 @@ fn push_static(
                     .as_path()
                     .map(|p| p.starts_with(target_dir))
                     .unwrap_or(false),
+            // Family D: see push_const's identical comment on this field.
+            macro_truncated: false,
             signature: model::Signature { params: Vec::new(), results },
             doc: s.hir_docs(db).map(|d| first_sentence(d.docs())),
             trait_impl: None,
@@ -642,6 +648,8 @@ fn push(
                     .as_path()
                     .map(|p| p.starts_with(target_dir))
                     .unwrap_or(false),
+            // Family D: see push_const's identical comment on this field.
+            macro_truncated: false,
             signature: model::Signature { params, results },
             doc,
             trait_impl: trait_impl_loc(db, sema, vfs, root, f),
