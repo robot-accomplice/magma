@@ -234,7 +234,10 @@ fn analyze_one_config(
     // `merge_configs`. Signature/type display requires the salsa db to be
     // attached to this thread (same requirement as the Semantics-based edge
     // extraction below).
-    let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
+    // Family D adaptation: `mut` because `walk::edges` below now takes
+    // `&mut` (it records a macro-expansion-depth-guard disclosure directly
+    // on the originating node — see model::Function::macro_truncated).
+    let mut funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
         let mut funcs =
             enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
@@ -277,7 +280,8 @@ fn analyze_one_config(
     // is attached".
     let (calls, init_nodes) = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
-        let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &funcs, &index);
+        // `&mut funcs`: Family D adaptation, see the `mut` binding above.
+        let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &mut funcs, &index);
         // Family C: gives every const/static/associated-const initializer
         // its own synthesized node (a real id in this pass's `functions`
         // array, never an invented/dangling one), then walks each
@@ -286,7 +290,7 @@ fn analyze_one_config(
         // enumerate::collect_inits and walk::init_edges. `funcs.len()`
         // continues the id space real functions already occupy — still
         // purely local to this one pass.
-        let inits = enumerate::collect_inits(
+        let mut inits = enumerate::collect_inits(
             db,
             &sema,
             &vfs,
@@ -294,7 +298,8 @@ fn analyze_one_config(
             target_dir_abs.as_path(),
             funcs.len() as u32,
         );
-        let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &inits, &index);
+        // `&mut inits`: Family D adaptation, same reason as `&mut funcs` above.
+        let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &mut inits, &index);
         calls.extend(init_edges);
         let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
         (calls, init_nodes)
