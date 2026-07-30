@@ -9,13 +9,26 @@ pub const CONTRACT_VERSION: &str = "magma-rust-helper/1";
 #[derive(Serialize)]
 pub struct Output {
     pub contract_version: String,
+    /// Whether producing this output ran the analysed repository's own code:
+    /// `build.rs` scripts executed and proc macros expanded. Go analysis never
+    /// does this — it only type-checks — so this is a trust-boundary fact a
+    /// consumer should be able to read rather than infer from `language ==
+    /// "rust"`. Derived from the `LoadCargoConfig` actually used to load the
+    /// workspace (see `main.rs`), not hard-coded, so it stays honest if a
+    /// sandboxed or no-execution mode is ever added.
+    pub executed_target_code: bool,
     pub functions: Vec<Function>,
     pub calls: Vec<Call>,
 }
 
 impl Output {
-    pub fn new(functions: Vec<Function>, calls: Vec<Call>) -> Self {
-        Output { contract_version: CONTRACT_VERSION.to_owned(), functions, calls }
+    pub fn new(executed_target_code: bool, functions: Vec<Function>, calls: Vec<Call>) -> Self {
+        Output {
+            contract_version: CONTRACT_VERSION.to_owned(),
+            executed_target_code,
+            functions,
+            calls,
+        }
     }
 }
 
@@ -159,6 +172,9 @@ pub struct Call {
 #[derive(Serialize)]
 pub struct Refusal {
     pub contract_version: String,
+    /// Always `false`: a refusal means analysis never ran, so nothing
+    /// executed. See `Output::executed_target_code`.
+    pub executed_target_code: bool,
     pub computable: bool,
     pub reason: String,
 }
@@ -167,6 +183,7 @@ impl Refusal {
     pub fn new(reason: impl Into<String>) -> Self {
         Refusal {
             contract_version: CONTRACT_VERSION.to_owned(),
+            executed_target_code: false,
             computable: false,
             reason: reason.into(),
         }
