@@ -1444,13 +1444,41 @@ edge layer in `walk.rs`**: resolve `BinExpr`/`PrefixExpr`/`IndexExpr` → `ops::
 format args → `Display::fmt`/`Debug::fmt`, scope exit → `Drop::drop`. Only then can roots be
 tightened to recover reporting power.
 
-## Why the gate stayed green, and what that means for the harness
+## Why the gate stayed green — CORRECTED
 
-The harness is **sound and honest** — both reviewers who attacked it agree, and it caught every
-one of these defects the moment it was given the right input. It refused rather than reporting a
-false green on a warm cache. The failure is **fixture coverage, not instrumentation**: no
-`testdata/` crate contains a function used as a value, a desugared operator call, a const
-initializer, a deep macro, a `cfg(not(test))` item, or a `derive`. Verified: zero fixtures match.
+**An earlier revision of this section claimed "the harness is sound and honest." That was written
+after two of three reviews and is WRONG. The third review, which attacked the instrument
+specifically, found two critical paths where it reports green having measured nothing.** Both
+reproduced personally:
+
+- **`considered: 0` is reported as success.** `generated` is
+  `is_macro_origin || path.contains("/target/") || path.contains("/build/")` against the
+  **absolute** path (`enumerate.rs:153-156`), and `oracle-diff.jq:79` excludes every generated
+  function from **both** directions. Copying `testdata/fixture` unmodified to `/tmp/build/proj`
+  yields `considered:0, excluded:12 (generated), fatal:0` and prints the FATAL:0 success line.
+  An ordinary `src/build/mod.rs` module does the same thing to a real crate. Nothing guards the
+  `considered` count.
+- **`cargo check`'s exit status is discarded** (`oracle-diff.sh:101-102`, `|| true`). A crate that
+  fails to compile emits zero `dead_code` diagnostics — rustc aborts before the lint pass — so the
+  harness books every function as `agree_live` and exits 0. The freshness guard passes *because*
+  rustc genuinely ran, so it is structurally incapable of catching this. This is the same
+  epistemic hole Task 8 closed for warm caches, reintroduced through a different door.
+  *(I hit this live while writing a probe this session: my crate failed with `E0015`, rustc
+  emitted no `dead_code` output, and I only noticed because I found the empty result suspicious.
+  Through the harness it would have been a silent green.)*
+
+So the honest statement is: **the gate logic (Task 16) is excellent and survived all eight attacks
+on it — set equality, symbol assertion, duplicate-key rejection, mandatory reasons, SUMMARY
+pinning. The oracle *pipeline feeding it* has two critical false-green paths.** Those are separate
+components and the distinction matters when fixing.
+
+Fixture coverage is also a real gap and remains true as written: no `testdata/` crate contains a
+function used as a value, a desugared operator call, a const initializer, a deep macro, a
+`cfg(not(test))` item, or a `derive`. Verified: zero fixtures match.
+
+**The common thread across every false-green: the instrument never checks that the oracle actually
+rendered a verdict.** The freshness guard answers "did rustc run?" — necessary, not sufficient.
+Two more guards are needed: *did it finish?* and *did we compare anything?*
 
 **Therefore the first task of the next phase is fixtures, not fixes.** Add a crate per family
 above, confirm each turns the gate RED with a FATAL that matches the family, and only then fix.
@@ -1471,3 +1499,47 @@ already burned this plan three times, at a larger scale.
 **Do not wire a magma-side Rust backend, and do not change
 `~/.claude/skills/magma/SKILL.md`'s "Rust is in development" line, until A–F are closed.** That
 line is currently accurate and is the thing protecting users.
+
+## Instrument defects (separate component from the gate — fix these FIRST of all)
+
+The gate (Task 16) is sound. The oracle pipeline feeding it is not. Until these are closed, **no
+measurement taken with this harness can be trusted**, including the "all 7 fixtures pass" claim and
+any before/after comparison the next phase makes. This is why they come before even the fixtures.
+
+| # | Defect | Effect |
+|---|---|---|
+| H1 | No guard on `considered == 0` | Instrument compares nothing, reports green. Triggered by any `/build/` or `/target/` path segment, incl. an ordinary `src/build/` module |
+| H2 | `cargo check` exit status discarded (`|| true`) | Non-compiling crate → zero `dead_code` output → every function booked `agree_live`, exit 0 |
+| H3 | Attribute scan matches doc-comment **prose** (`oracle-diff.sh:222,230`) | A doc comment mentioning `#[allow(dead_code)]` in English silently drops the function from both directions |
+| H4 | Oracle scope narrower than enumeration scope | `cargo check --workspace` skips `examples/`, `tests/`, `benches/`; the helper enumerates them → both false FATALs and fake `agree_live`. Freshness guard is package-granular, not target-granular |
+| H5 | **No `cargo check --profile test` run exists at all** | The spec describes a two-config oracle; `grep` finds one invocation. Combined with `test:true` excluded from both directions, the helper's test-code handling is entirely unmeasured — while `reachable` vs `prod_reachable` is a shipped contract concept |
+| H6 | `oracle-diff.sh`'s documented exit-3 refusal path is unreachable | `set -e` kills the script at `:87` on the helper's exit-2 refusal before the `.computable == false` check at `:90`. `oracle-gate.sh`'s dedicated rc-3 branch never fires |
+| H7 | `#![allow(dead_code)]` at crate root undetected | FATAL direction survives (fails safe), but `report_only` collapses and functions are booked `agree_live` — parity evidence manufactured from an oracle told to say nothing. `#[allow(unused)]` also not in the regex list |
+| H8 | `executed_target_code` emitted but never asserted | No script checks it, no baseline pins it. Disabling the proc-macro server would go unnoticed on a real workspace |
+
+**H1 and H2 share a shape with the `generated` contract defect**: one substring heuristic
+(`/build/`, `/target/`) blinds the instrument *and* suppresses user-facing dead rows. Fixing
+`generated` properly closes both. The ledger recorded `/build/` as a deferred cosmetic Minor —
+that assessment was wrong twice over.
+
+## Also unmeasured (no fixture, no probe, anywhere on this branch)
+
+Proc macros and `#[derive]`-generated methods (excluded wholesale as `generated`, so
+`executed_target_code`'s entire subject is untested) · macro-generated trait/type declarations
+feeding the cascade key, whose soundness argument assumes two items cannot share a
+`(file,line,column)` — false once rustc remaps spans to a call site · **multi-crate workspaces**
+(every fixture is a single package, so cross-crate `pub` reachability and the disclosed
+`transitive_rev_deps` gap are untested) · `async fn`, closures, function pointers, generic trait
+objects, `impl Trait` returns · `#[no_mangle]`/`#[used]`/`#[export_name]` (exclusion code exists,
+zero fixture coverage) · non-ASCII **identifiers** (utf8col only covers non-ASCII in a preceding
+comment, so Task 17's column fix has never been tested against Task 13's collision fix).
+
+## One baselined FATAL needs a linked fix task, not permanent adjudication
+
+`testdata/collision/oracle-expected.json` entry 2 (`live_method` @ `src/main.rs:22:12`) is
+accurately reasoned, but what it normalises is a **pervasive real class**: any trait method called
+statically on a concrete type leaves its trait-declaration node with no incoming edge, so a
+consumer sees `Trait::method` as dead. A five-line crate reproduces it with 2 FATALs. Task 9 fixed
+the *dyn* case by emitting a declaration edge; the **static** case was never fixed. Left as-is,
+real workspaces produce this at volume, the set-equality baseline becomes unmaintainable, and that
+creates exactly the pressure to paste reasons that has burned this plan three times.
