@@ -1,40 +1,20 @@
 {
-  "adjudication": "open-defect-awaiting-phase-b-fix",
-  "fatal": [
-    {
-      "symbol": "<Widget as Display>::fmt",
-      "pkg": "desugar",
-      "file": "src/main.rs",
-      "line": 17,
-      "column": 8,
-      "status": "open-defect",
-      "reason": "OPEN DEFECT (Plan A outcome, Family B) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `Widget::fmt` (the fully-qualified `impl core::fmt::Display for Widget`) is reached only through `println!(\"{}\", w)`'s desugaring to the format-args machinery, which captures `Display::fmt` as a function pointer internally rather than emitting a syntactic CallExpr/MethodCallExpr walk.rs can resolve. walk.rs models no desugaring at all (operators, for/?/await, Drop, or format args), so this edge is invisible. rustc emits no dead_code warning (the impl is genuinely used via `println!`); the helper has no incoming edge to `fmt` and it is not a root (no crate-root `use` statement exists in this fixture, deliberately, per the plan's trap note -- adding one would make this impl survive as a root only by the accidental roots.rs re-export-bridge mechanism the plan warns about, masking this exact family instead of exposing it), so it reads dead. Fix tracked for Phase B (desugaring resolution in walk.rs, described in the plan as the deepest of the six families); not suppressed or excluded here."
-    }
-  ],
+  "adjudication": "fixed-family-b-format-args-display-debug",
+  "fatal": [],
   "summary": {
     "considered": 2,
     "excluded": 0,
     "agree_dead": 0,
-    "agree_live": 1,
-    "fatal": 1
+    "agree_live": 2,
+    "fatal": 0
   },
   "executed_target_code": true,
-  "fatal_test": [
-    {
-      "symbol": "<Widget as Display>::fmt",
-      "pkg": "desugar",
-      "file": "src/main.rs",
-      "line": 17,
-      "column": 8,
-      "status": "open-defect",
-      "reason": "H5 (test-config direction): same OPEN DEFECT as the plain-config entry above, reproduced identically under the test-profile oracle. `fmt` is not test-context code and this fixture has no test/bench entry point, so the all-roots seed set equals the production-roots set here -- the helper's reachability verdict for `fmt` is unchanged between configs. rustc's test-profile compile also emits no dead_code warning for it (the `println!` desugaring call site exists unconditionally, not behind cfg(test)), so the oracle's verdict is unchanged too. Same root cause (walk.rs models no format-args desugaring), same fix tracked for Phase B; not suppressed or excluded here."
-    }
-  ],
+  "fatal_test": [],
   "summary_test": {
     "considered": 2,
     "excluded": 0,
     "agree_dead": 0,
-    "agree_live": 1,
-    "fatal": 1
+    "agree_live": 2,
+    "fatal": 0
   }
 }
