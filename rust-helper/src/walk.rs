@@ -12,6 +12,7 @@ use ra_ap_syntax::{ast, AstNode, SyntaxNode};
 use ra_ap_vfs::Vfs;
 
 use crate::enumerate;
+use crate::enumerate::InitSource;
 use crate::model;
 
 /// One resolved call site before aggregation.
@@ -48,6 +49,72 @@ pub fn edges(
 
         let mut sites = Vec::new();
         walk(sema, body.syntax(), &mut sites, 0, db, vfs, root);
+
+        for s in sites {
+            let Some(&to) = index.get(&s.to) else { continue }; // out of workspace
+            let key = (node.id, to);
+            agg.entry(key)
+                .and_modify(|c| {
+                    if !s.dynamic {
+                        c.kind = "static".to_owned(); // static site upgrades the pair
+                    }
+                })
+                .or_insert(model::Call {
+                    from: node.id,
+                    to,
+                    site_file: s.file.clone(),
+                    site_line: s.line,
+                    kind: if s.dynamic { "dynamic" } else { "static" }.to_owned(),
+                });
+        }
+    }
+
+    let mut out: Vec<model::Call> = agg.into_values().collect();
+    out.sort_by_key(|c| (c.from, c.to)); // deterministic output
+    out
+}
+
+/// Family C: closes the false-dead-code gap `edges()` above cannot reach —
+/// a call written inside a const/static/associated-const initializer
+/// expression, which is never a function's own body nor contained in one,
+/// so `edges()`'s loop (which only ever visits `f.source(db).value.body()`
+/// for an enumerated `ra_ap_hir::Function`) never sees it. `inits` pairs
+/// each synthesized initializer node (`enumerate::collect_inits`) with the
+/// hir handle needed to re-derive its initializer expression's syntax tree.
+///
+/// A new, additive entry point rather than a change to `edges()` or `walk()`
+/// — both are untouched. The aggregation loop below is a deliberate,
+/// near-verbatim duplicate of `edges()`'s: `walk()` (the actual traversal
+/// this and `edges()` both feed into) is shared with a concurrently active
+/// task and stays as the one and only place the traversal itself lives; only
+/// the small "which bodies do I start from, and how do the ids materialise"
+/// wrapper differs between a real function and a synthesized initializer.
+pub fn init_edges(
+    sema: &Semantics<'_, RootDatabase>,
+    db: &RootDatabase,
+    vfs: &Vfs,
+    root: &AbsPath,
+    inits: &[(model::Function, InitSource)],
+    index: &HashMap<ra_ap_hir::Function, u32>,
+) -> Vec<model::Call> {
+    let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
+
+    for (node, src) in inits {
+        let mut sites = Vec::new();
+        match src {
+            InitSource::Const(c) => {
+                let Some(csrc) = c.source(db) else { continue };
+                let _ = sema.parse_or_expand(csrc.file_id);
+                let Some(body) = csrc.value.body() else { continue };
+                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root);
+            }
+            InitSource::Static(s) => {
+                let Some(ssrc) = s.source(db) else { continue };
+                let _ = sema.parse_or_expand(ssrc.file_id);
+                let Some(body) = ssrc.value.body() else { continue };
+                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root);
+            }
+        }
 
         for s in sites {
             let Some(&to) = index.get(&s.to) else { continue }; // out of workspace

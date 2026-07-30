@@ -66,7 +66,15 @@ pub struct Function {
     /// specific method name, not just the shared line.
     pub column: u32,
     /// "func" for free functions AND associated fns without a receiver;
-    /// "method" for anything with a `self` receiver.
+    /// "method" for anything with a `self` receiver; "init" for a
+    /// synthesized node standing in for a const/static/associated-const
+    /// item's initializer expression (Family C — see
+    /// `enumerate::collect_inits`). A new VALUE on this existing field, not
+    /// a new field, so per the recorded contract-governance rule (new value
+    /// = one-sided, new field = two-sided) this needs no consumer
+    /// coordination before shipping. An "init" node has no `fn`/`method`
+    /// declaration of its own to point `file`/`line`/`column` at — they
+    /// point at the const/static item's own name token instead.
     pub kind: String,
     /// `pub` visibility, syntactic: the item's own `pub` keyword, independent
     /// of whether an enclosing module is private. Root status (see `root`) is

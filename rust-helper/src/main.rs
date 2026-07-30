@@ -169,6 +169,11 @@ fn main() -> anyhow::Result<()> {
     let t2 = Instant::now();
     let mut edges = 0usize;
     let mut calls: Vec<model::Call> = Vec::new();
+    // Family C nodes (const/static/associated-const initializers) — see
+    // enumerate::collect_inits. Populated only on the non-outgoing path,
+    // same as `calls`; `--outgoing` is the pre-existing outgoing_calls
+    // comparison mode and never emits Output/functions at all.
+    let mut init_nodes: Vec<model::Function> = Vec::new();
     if use_outgoing {
         let cfg = CallHierarchyConfig { exclude_tests: false, ra_fixture: RaFixtureConfig::default() };
         for (mf, f) in &funcs {
@@ -186,18 +191,45 @@ fn main() -> anyhow::Result<()> {
         // thread. Analysis::with_db does this internally; using Semantics directly
         // does not, and inference panics with "Try to use attached db, but not db
         // is attached".
-        calls = ra_ap_hir::attach_db(db, || {
+        let init_call_count;
+        (calls, init_nodes, init_call_count) = ra_ap_hir::attach_db(db, || {
             let sema = Semantics::new(db);
-            walk::edges(&sema, db, &vfs, root_abs.as_path(), &funcs, &index)
+            let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &funcs, &index);
+            // Family C: gives every const/static/associated-const
+            // initializer its own synthesized node (a real id in the
+            // `functions` array, never an invented/dangling one), then
+            // walks each initializer expression the same way a function
+            // body is walked, so a call made from one is no longer
+            // structurally invisible. See enumerate::collect_inits and
+            // walk::init_edges. `funcs.len()` continues the id space real
+            // functions already occupy.
+            let inits = enumerate::collect_inits(
+                db,
+                &sema,
+                &vfs,
+                root_abs.as_path(),
+                target_dir_abs.as_path(),
+                funcs.len() as u32,
+            );
+            let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &inits, &index);
+            let init_call_count = init_edges.len();
+            calls.extend(init_edges);
+            let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
+            (calls, init_nodes, init_call_count)
         });
         edges = calls.len();
-        eprintln!("MODE semantics+macro-descent");
+        eprintln!(
+            "MODE semantics+macro-descent ({} initializer nodes, {} initializer edges)",
+            init_nodes.len(),
+            init_call_count
+        );
     }
     eprintln!("TIMING edges: {:.1}s for {} edges", t2.elapsed().as_secs_f64(), edges);
     eprintln!("TIMING TOTAL: {:.1}s", t0.elapsed().as_secs_f64());
 
     if !use_outgoing {
-        let functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
+        let mut functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
+        functions.extend(init_nodes);
         let out = model::Output::new(executed_target_code, functions, calls);
         println!("{}", serde_json::to_string_pretty(&out)?);
     }
