@@ -228,10 +228,22 @@ families A–F close.
 | **Family C** — initializer calls | Closed via **synthesized `init` nodes**, following Go's `init#N` precedent (verified: magma's own graph has 8). `{qualified}#init`, `kind:"init"` (new *value* = one-sided), rooted. `fn_value` and `const_init` both at `fatal:0` — verified by me, not just by a gate PASS |
 | **Contract defects 1–5** | `executed_target_code` honest per refusal site; every soft-refusal path emits `computable:false` JSON and Go's exit convention adopted (0=refusal, 2=usage); `test` derived from cfg-ancestry + target kind so `#[cfg(test)] pub mod` no longer becomes a production root; `generated` no longer swallows hand-written `macro_rules!`; `symbol` qualified (`<T as Trait>::m`) so `(pkg,symbol)` is unique |
 
-**Behavioural change worth knowing before wiring:** fixing `test` derivation means a crate whose
-only `pub` items live under `#[cfg(test)]` now **refuses** ("no roots in scope") where it
-previously reported a confident production root. Correct, and in the safe direction, but real
-crates will start refusing where they previously produced a map.
+**Behavioural change, and the standing principle behind it.** Fixing `test` derivation means a
+crate whose only `pub` items live under `#[cfg(test)]` now **refuses** ("no roots in scope") where
+it previously reported a confident production root. That crate has no production entry point, so
+there is no production reachability to compute. **This is the designed behaviour, not a cost.**
+
+> **Mapping every crate is not the goal.** magma's job is an honest map or an honest refusal.
+> Refusal rate is not a quality metric and must never be optimised down. A refusal is a real
+> answer — the Go path already works this way, and the magma skill documents it.
+
+This principle is load-bearing for the rest of Phase B, because every remaining family creates the
+same temptation: **widen roots until things stop looking dead.** That is the "treat impls of
+non-local traits as roots" trap called out for family B — it turns a symptom green while making
+every trait impl a permanent root, destroying the tool's ability to ever report a dead trait impl
+again. Any fix that raises the number of mapped crates or lowers the number of dead rows *by
+widening roots rather than by finding real edges* is moving backwards, however green it looks.
+Fix the **edge layer**; let roots stay tight; let honest refusals happen.
 
 ## Still open
 
