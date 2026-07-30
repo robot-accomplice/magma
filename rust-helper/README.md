@@ -64,7 +64,9 @@ logic.
 
 ## Known gaps before this is production
 
-- **No refusals.** Missing toolchain and declined-consent paths are unimplemented.
+- **Refusals cover missing argument, non-cargo workspace, workspace type/load errors, and no
+  production roots** (all emit a `computable:false` JSON envelope; see Phase B Task C). Missing
+  toolchain and declined-consent paths are still unimplemented.
 - **Crate name is `magma-rust-helper-spike`** — rename when it becomes the real helper.
 
 Dependencies are pinned exactly (`=0.0.343`); `ra_ap_*` offers no API stability guarantee, so
