@@ -1,0 +1,40 @@
+{
+  "adjudication": "open-defect-awaiting-phase-b-fix",
+  "fatal": [
+    {
+      "symbol": "double",
+      "pkg": "fn_value",
+      "file": "src/main.rs",
+      "line": 6,
+      "column": 4,
+      "status": "open-defect",
+      "reason": "OPEN DEFECT (Plan A outcome, Family A) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `double` is passed by name to `.into_iter().map(double)` -- a function used as a VALUE, never as a direct call. walk.rs:94 only resolves ast::CallExpr with a PathExpr callee, so passing a function's name as a value produces no CallExpr at all and therefore no edge. rustc compiles `vec![1,2,3].into_iter().map(double).collect()` and emits no dead_code warning for `double`; the helper has no incoming edge to it and no root reaches it, so it reads dead. This is the exact false-dead-code failure the Plan A outcome section documents for this family -- fix tracked for Phase B (walk.rs must resolve function-valued PathExpr/array-literal/let-binding contexts, not just CallExpr callees), not suppressed or excluded here."
+    },
+    {
+      "symbol": "handler_a",
+      "pkg": "fn_value",
+      "file": "src/main.rs",
+      "line": 9,
+      "column": 4,
+      "status": "open-defect",
+      "reason": "OPEN DEFECT (Plan A outcome, Family A) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `handler_a` appears only as an entry in the static fn-pointer table `static TABLE: [fn() -> i32; 1] = [handler_a];` -- a function used as a value inside an array literal, not a CallExpr. walk.rs never resolves this shape, so no edge is created; rustc considers `handler_a` live (called indirectly through `TABLE[0]()` in `main`) and emits no dead_code warning. Fix tracked for Phase B; not suppressed or excluded here."
+    },
+    {
+      "symbol": "init_b_const",
+      "pkg": "fn_value",
+      "file": "src/main.rs",
+      "line": 12,
+      "column": 10,
+      "status": "open-defect",
+      "reason": "OPEN DEFECT (Plan A outcome, Family A/C overlap) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `init_b_const` is called only from a static initializer (`static S: i32 = init_b_const();`), which is outside any enumerated function's body (walk.rs walks only `f.source(db).value.body()` -- Family C's cause) and is never referenced as a direct call from within a function body either (Family A's cause: no PathExpr CallExpr targets it). rustc considers it live (used to compute `S`, which `main` prints) and emits no dead_code warning. Fix tracked for Phase B; not suppressed or excluded here."
+    }
+  ],
+  "summary": {
+    "considered": 5,
+    "excluded": 0,
+    "agree_dead": 1,
+    "agree_live": 1,
+    "fatal": 3
+  },
+  "executed_target_code": true
+}

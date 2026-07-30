@@ -1,0 +1,13 @@
+{
+  "adjudication": "open-defect-awaiting-phase-b-fix",
+  "note": "Family F (nodes emitted inside the user's rustup toolchain) reproduces as a genuine METADATA defect, verified directly in the helper's JSON output rather than through this harness's FATAL mechanism: the derived `impl core::fmt::Debug for Widget`'s `fmt` method is emitted as a node whose `file` resolves to `~/.rustup/toolchains/<toolchain>/lib/rustlib/src/rust/library/core/src/fmt/mod.rs` (line 1084 in the toolchain observed on this machine) with `generated: false` and `exported: true` -- none of which are correct for a synthesized derive-macro method. This does NOT surface as a FATAL here: the node's `root` field is also (incorrectly) `true`, even when the derived-on struct and every function touching it are fully private (verified with a second, throwaway private-Widget variant of this fixture) -- rust-analyzer's builtin Debug-derive expansion represents the generated method's own Visibility as Public, which trips roots.rs's `all_ancestors_public` fallback regardless of the struct's real visibility. Since the node is always considered reachable, the reachability-based dead-code comparison this harness performs can never disagree with rustc about it, so FATAL is empty for this fixture by construction -- the defect is real and reproduced (see the raw field values above) but structurally invisible to this particular measuring instrument. Per Task F's instructions, this is reported honestly rather than manufacturing a fixture shape to force a FATAL that would misrepresent the actual failure mode.",
+  "fatal": [],
+  "summary": {
+    "considered": 2,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 2,
+    "fatal": 0
+  },
+  "executed_target_code": true
+}

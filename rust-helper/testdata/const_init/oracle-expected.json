@@ -1,0 +1,22 @@
+{
+  "adjudication": "open-defect-awaiting-phase-b-fix",
+  "fatal": [
+    {
+      "symbol": "helper",
+      "pkg": "const_init",
+      "file": "src/main.rs",
+      "line": 6,
+      "column": 10,
+      "status": "open-defect",
+      "reason": "OPEN DEFECT (Plan A outcome, Family C) awaiting Phase B fix, NOT an adjudicated/acceptable FATAL. `helper` (a `const fn`) is called only from the const initializer `const VALUE: i32 = helper();`, which is not inside any enumerated function's body -- walk.rs walks only `f.source(db).value.body()`, and a const/static initializer expression is neither a function body itself nor contained in one. rustc traces const evaluation and considers `helper` live (no dead_code warning; only `really_dead`, which is genuinely unused, is flagged); the helper has no incoming edge to `helper` and it is not a root (private fn), so it reads dead. Fix tracked for Phase B (walk.rs must also walk const/static/associated-const initializer expressions, not just function bodies); not suppressed or excluded here."
+    }
+  ],
+  "summary": {
+    "considered": 3,
+    "excluded": 0,
+    "agree_dead": 1,
+    "agree_live": 1,
+    "fatal": 1
+  },
+  "executed_target_code": true
+}
