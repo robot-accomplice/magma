@@ -24,6 +24,7 @@ pub fn collect(
     sema: &Semantics<'_, RootDatabase>,
     vfs: &Vfs,
     root: &AbsPath,
+    target_dir: &AbsPath,
 ) -> Vec<(model::Function, ra_ap_hir::Function)> {
     let mut out = Vec::new();
     for krate in Crate::all(db) {
@@ -33,12 +34,12 @@ pub fn collect(
         for module in krate.modules(db) {
             for decl in module.declarations(db) {
                 if let ModuleDef::Function(f) = decl {
-                    push(db, sema, vfs, root, f, &mut out);
+                    push(db, sema, vfs, root, target_dir, f, &mut out);
                 }
                 if let ModuleDef::Trait(tr) = decl {
                     for item in tr.items(db) {
                         if let AssocItem::Function(f) = item {
-                            push(db, sema, vfs, root, f, &mut out);
+                            push(db, sema, vfs, root, target_dir, f, &mut out);
                         }
                     }
                 }
@@ -46,7 +47,7 @@ pub fn collect(
             for imp in module.impl_defs(db) {
                 for item in imp.items(db) {
                     if let AssocItem::Function(f) = item {
-                        push(db, sema, vfs, root, f, &mut out);
+                        push(db, sema, vfs, root, target_dir, f, &mut out);
                     }
                 }
             }
@@ -83,6 +84,7 @@ fn push(
     sema: &Semantics<'_, RootDatabase>,
     vfs: &Vfs,
     root: &AbsPath,
+    target_dir: &AbsPath,
     f: ra_ap_hir::Function,
     out: &mut Vec<(model::Function, ra_ap_hir::Function)>,
 ) {
@@ -150,10 +152,22 @@ fn push(
             test: f.is_test(db),
             root: false,   // Task 5
             bench: f.is_bench(db),
-            generated: {
-                let p = vfs.file_path(file_id).to_string();
-                is_macro_origin || p.contains("/target/") || p.contains("/build/")
-            },
+            // H1 fix: anchored to the workspace's OWN target directory
+            // (resolved via `cargo metadata`, see main.rs::discover_target_dir),
+            // not an unanchored substring match on the absolute path. The prior
+            // `p.contains("/target/") || p.contains("/build/")` matched an
+            // ordinary user module named `build`, or any checkout path merely
+            // containing the segment `/build/` (e.g. a fixture copied under
+            // `/tmp/build/proj`) — silently reclassifying every function in the
+            // crate as generated and, downstream, excluding all of them from
+            // the oracle comparison (see oracle-diff.sh's H1 refusal for what
+            // catches the case this heuristic itself can't).
+            generated: is_macro_origin
+                || vfs
+                    .file_path(file_id)
+                    .as_path()
+                    .map(|p| p.starts_with(target_dir))
+                    .unwrap_or(false),
             signature: model::Signature { params, results },
             doc,
             trait_impl: trait_impl_loc(db, sema, vfs, root, f),

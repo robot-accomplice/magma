@@ -53,6 +53,12 @@ fn main() -> anyhow::Result<()> {
     // Same absolute-path computation load_workspace_at uses internally, so
     // stripping this prefix from vfs paths yields a repo-relative path.
     let root_abs = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(&root));
+    // H1 fix: the workspace's own target directory, used to anchor the
+    // `generated` heuristic instead of an unanchored substring match (see
+    // enumerate.rs). Resolved via `cargo metadata` rather than assuming
+    // `<root>/target`, so a `CARGO_TARGET_DIR` override or a `target-dir`
+    // setting in `.cargo/config.toml` is still honoured correctly.
+    let target_dir_abs = discover_target_dir(&root_abs)?;
 
     let host = AnalysisHost::with_database(db);
     let analysis = host.analysis();
@@ -64,7 +70,8 @@ fn main() -> anyhow::Result<()> {
     // thread (same requirement as the Semantics-based edge extraction below).
     let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
-        let mut funcs = enumerate::collect(db, &sema, &vfs, root_abs.as_path());
+        let mut funcs =
+            enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
         roots::mark(db, &mut funcs);
         funcs
     });
@@ -121,6 +128,32 @@ fn main() -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&out)?);
     }
     Ok(())
+}
+
+/// Resolves the workspace's actual target directory via `cargo metadata`
+/// (the same technique `scripts/oracle-diff.sh` already trusts), rather than
+/// assuming `<root>/target` — a `CARGO_TARGET_DIR` env var or a `target-dir`
+/// key in `.cargo/config.toml` can relocate it. Used to anchor the
+/// `generated` heuristic in `enumerate.rs` (Task H1): a function's file must
+/// fall *under* this exact directory to count as generated, never merely
+/// contain a `/target/` or `/build/` path segment.
+fn discover_target_dir(root_abs: &AbsPathBuf) -> anyhow::Result<AbsPathBuf> {
+    let output = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version=1"])
+        .current_dir(root_abs.as_path())
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo metadata failed while resolving the workspace's target directory: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let meta: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let target_directory = meta
+        .get("target_directory")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("cargo metadata output missing target_directory"))?;
+    Ok(AbsPathBuf::assert_utf8(std::path::PathBuf::from(target_directory)))
 }
 
 fn pos_of(db: &RootDatabase, f: ra_ap_hir::Function) -> Option<FilePosition> {
