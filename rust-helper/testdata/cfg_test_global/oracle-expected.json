@@ -18,5 +18,14 @@
     "agree_live": 1,
     "fatal": 1
   },
-  "executed_target_code": true
+  "executed_target_code": true,
+  "fatal_test_note": "H5 (test-config direction): fatal_test is empty here, but that does NOT mean Family E is fixed -- it means the test-config direction happens not to expose it. main.rs's single, permanently cfg(test)-on load still never enumerates `real_clock` at all, in EITHER view; that root cause is unchanged by H5 (H5 only adds a second ORACLE run and a second reachability computation over the helper's existing single graph, per its file-ownership boundary -- it does not touch main.rs's load). For the test-config comparison specifically, `real_clock`'s absence happens to be CORRECT rather than a divergence: the test-profile oracle (`cargo check --profile test`) also compiles with cfg(test) on, so it likewise never sees `#[cfg(not(test))] pub fn real_clock()`, and clock_helper is reached instead through `tests::uses_it` (now an all-roots seed as a literal #[test] function), matching the oracle's own verdict. So both sides agree for the reason the test-config direction was built to measure, not because Family E was fixed. Family E remains open, gated on a second cfg(test)-OFF helper load (Phase B, src/main.rs) -- see the plain-config `fatal[0].reason` above, and the H5 task report for confirmation this fixture still cannot be gated without its `tests::uses_it` workaround.",
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 3,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 3,
+    "fatal": 0
+  }
 }

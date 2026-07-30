@@ -24,5 +24,30 @@
     "agree_live": 10,
     "fatal": 2
   },
-  "executed_target_code": true
+  "executed_target_code": true,
+  "fatal_test": [
+    {
+      "symbol": "HidTr::hid_m",
+      "pkg": "libonly::hidden_trait",
+      "file": "src/lib.rs",
+      "line": 102,
+      "column": 12,
+      "reason": "H5 (test-config direction): same Task-9 residual gap as the plain-config entry above, reproduced identically under the test-profile oracle. HidTr/hid_m/HidS are not test-context, so the all-roots seed adds nothing here. rustc's test-profile compile still emits only 'trait `HidTr` is never used' on the trait's own name line (101), nothing on hid_m's own trait-declaration line (102) -- same class as collision::dead_side::dead_method."
+    },
+    {
+      "symbol": "PrivTr::priv_m",
+      "pkg": "libonly::hidden_prim_trait",
+      "file": "src/lib.rs",
+      "line": 130,
+      "column": 12,
+      "reason": "H5 (test-config direction): same Task-9 residual gap as the plain-config entry above. PrivTr is not test-context, so all-roots reachability is unchanged. rustc's test-profile compile still emits only 'trait `PrivTr` is never used' on the trait's own name line (129), nothing on priv_m's own trait-declaration line (130); the impl copy (PrivTr for i32, src/lib.rs:133) is still correctly excluded by the trait-impl-cascade's builtin-self-type branch in this config too."
+    }
+  ],
+  "summary_test": {
+    "considered": 18,
+    "excluded": 2,
+    "agree_dead": 5,
+    "agree_live": 11,
+    "fatal": 2
+  }
 }

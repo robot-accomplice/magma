@@ -9,5 +9,13 @@
     "agree_live": 2,
     "fatal": 0
   },
-  "executed_target_code": true
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 2,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 2,
+    "fatal": 0
+  }
 }
