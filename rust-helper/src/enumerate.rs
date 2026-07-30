@@ -5,6 +5,7 @@ use ra_ap_hir::{
     HasVisibility, HirDisplay, InFile, ModuleDef, Semantics, Visibility,
 };
 use ra_ap_ide_db::base_db::CrateOrigin;
+use ra_ap_ide_db::line_index::{TextSize, WideEncoding};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_paths::AbsPath;
 use ra_ap_syntax::ast::HasName;
@@ -54,6 +55,29 @@ pub fn collect(
     out
 }
 
+/// Resolves a UTF-8 byte `offset` in `file_id` to a (0-based line, 0-based
+/// *character* column) pair, matching rustc's own column convention rather
+/// than ra_ap's. `LineIndex::line_col` returns a UTF-8 *byte* column
+/// (`line-index`'s own doc comment: "Zero-based UTF-8 offset"), while
+/// rustc's diagnostic columns count Unicode scalar values (characters) — the
+/// two agree on ASCII lines but diverge on any line carrying multi-byte
+/// UTF-8 text, which broke the oracle harness's (file, line, column) key on
+/// such lines (Task 17). `to_wide(WideEncoding::Utf32, ..)` performs exactly
+/// this byte-to-character conversion. `Utf32`, not `Utf16` (which is what
+/// LSP wide-column callers elsewhere in ra_ap want), is required: rustc
+/// counts characters, and UTF-16 would undercount by one per surrogate pair
+/// for anything outside the BMP (e.g. emoji) — `WideEncoding::measure`
+/// confirms `Utf32 => text.chars().count()`, `Utf16 =>
+/// text.encode_utf16().count()`.
+fn char_line_col(db: &RootDatabase, file_id: FileId, offset: TextSize) -> (u32, u32) {
+    let index = ra_ap_ide_db::line_index(db, file_id);
+    let line_col = index.line_col(offset);
+    let wide = index
+        .to_wide(WideEncoding::Utf32, line_col)
+        .expect("a LineCol produced by the same LineIndex always converts");
+    (line_col.line, wide.col)
+}
+
 fn push(
     db: &RootDatabase,
     sema: &Semantics<'_, RootDatabase>,
@@ -81,17 +105,16 @@ fn push(
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
-            let line_col = ra_ap_ide_db::line_index(db, file_id)
-                .line_col(name_node.syntax().text_range().start());
-            (file_id, line_col.line, line_col.col)
+            let (line, column) =
+                char_line_col(db, file_id, name_node.syntax().text_range().start());
+            (file_id, line, column)
         }
         None => {
             sema.parse_or_expand(src.file_id);
             let range = sema.original_range(name_node.syntax());
             let file_id = range.file_id.file_id(db);
-            let line_col =
-                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start());
-            (file_id, line_col.line, line_col.col)
+            let (line, column) = char_line_col(db, file_id, range.range.start());
+            (file_id, line, column)
         }
     };
 
@@ -218,17 +241,16 @@ fn decl_loc<N: AstNode + HasName>(
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
-            let line_col = ra_ap_ide_db::line_index(db, file_id)
-                .line_col(name_node.syntax().text_range().start());
-            (file_id, line_col.line, line_col.col)
+            let (line, column) =
+                char_line_col(db, file_id, name_node.syntax().text_range().start());
+            (file_id, line, column)
         }
         None => {
             sema.parse_or_expand(src.file_id);
             let range = sema.original_range(name_node.syntax());
             let file_id = range.file_id.file_id(db);
-            let line_col =
-                ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start());
-            (file_id, line_col.line, line_col.col)
+            let (line, column) = char_line_col(db, file_id, range.range.start());
+            (file_id, line, column)
         }
     };
     Some(model::Loc {

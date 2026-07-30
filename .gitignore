@@ -15,3 +15,4 @@ cover.out
 /rust-helper/testdata/traitdecl/target/
 /rust-helper/testdata/buildgen/target/
 /rust-helper/testdata/collision/target/
+/rust-helper/testdata/utf8col/target/
