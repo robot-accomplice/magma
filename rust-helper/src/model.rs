@@ -38,6 +38,11 @@ impl Output {
 #[derive(Serialize)]
 pub struct Function {
     pub id: u32,
+    /// Bare for a free function; qualified with its receiver/impl type for
+    /// an associated item (`T::m`, or `<T as Trait>::m` for a trait impl —
+    /// see `enumerate::qualified_symbol`) so `(pkg, symbol)` is unique. `id`
+    /// remains the only field edges use to identify endpoints; `symbol` is
+    /// for display and for keying a consumer's own node id.
     pub symbol: String,
     /// Crate + module path, e.g. "mycrate::net::client".
     pub pkg: String,
@@ -68,7 +73,11 @@ pub struct Function {
     /// computed separately in `roots.rs` from *effective* visibility, because
     /// a `pub fn` in a private module is not part of the crate's public API.
     pub exported: bool,
-    /// Declared in test code (`Function::is_test`).
+    /// Genuinely test-only: never reachable in a production (non-test)
+    /// build. True for `#[test]`, but also for anything under `#[cfg(test)]`
+    /// ancestry or inside a Cargo `tests/`/`benches/` integration target —
+    /// see `enumerate::is_test_context`, which computes this; it is NOT
+    /// simply the `#[test]` attribute.
     pub test: bool,
     /// An entry point: a bin `main`, or a lib `pub` item. Set in Task 5.
     pub root: bool,
@@ -175,18 +184,27 @@ pub struct Call {
 #[derive(Serialize)]
 pub struct Refusal {
     pub contract_version: String,
-    /// Always `false`: a refusal means analysis never ran, so nothing
-    /// executed. See `Output::executed_target_code`.
+    /// Whether producing THIS refusal ran the analysed repository's own
+    /// code, same meaning as `Output::executed_target_code` — NOT always
+    /// `false`. A refusal can fire after a successful workspace load (e.g.
+    /// "no roots in scope"), by which point build scripts already executed
+    /// and the proc-macro server already expanded macros; reporting `false`
+    /// there would be a lie on the one field whose entire purpose is to be a
+    /// trust boundary. Only refusals that fire BEFORE `load_workspace_at` is
+    /// even attempted (a missing argument) or that come FROM its own failure
+    /// (not a valid cargo workspace — which fails before build-script
+    /// execution) are honestly `false`. Callers of `Refusal::new` must pass
+    /// the real value for the point where the refusal fires, not a constant.
     pub executed_target_code: bool,
     pub computable: bool,
     pub reason: String,
 }
 
 impl Refusal {
-    pub fn new(reason: impl Into<String>) -> Self {
+    pub fn new(executed_target_code: bool, reason: impl Into<String>) -> Self {
         Refusal {
             contract_version: CONTRACT_VERSION.to_owned(),
-            executed_target_code: false,
+            executed_target_code,
             computable: false,
             reason: reason.into(),
         }
