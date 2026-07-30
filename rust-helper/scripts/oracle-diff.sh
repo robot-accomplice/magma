@@ -84,12 +84,17 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== running helper on $REPO_ABS ==" >&2
-# H6: the helper's documented no-roots refusal exits 2. Under `set -e`, a
-# direct (non-subshell, non-conditional) invocation that exits non-zero
-# kills the script right here, before the `.computable == false` check
-# below ever runs — so the dedicated rc-3 refusal path was unreachable and
-# a refusal instead surfaced as an unexplained script abort. `set +e`
-# around just this invocation lets the exit code be inspected explicitly.
+# H6: the helper's documented no-roots refusal exits non-zero (was 2 before
+# Task C's contract-defect fixes; the helper now mirrors Go's convention —
+# every `computable:false` soft refusal exits 0, only a usage error like a
+# missing argument exits 2 — but this script's own detection below keys off
+# the JSON envelope, not a specific exit code, so it needs no logic change).
+# Under `set -e`, a direct (non-subshell, non-conditional) invocation that
+# exits non-zero kills the script right here, before the
+# `.computable == false` check below ever runs — so the dedicated rc-3
+# refusal path was unreachable and a refusal instead surfaced as an
+# unexplained script abort. `set +e` around just this invocation lets the
+# exit code be inspected explicitly.
 set +e
 "$HELPER" "$REPO_ABS" >"$WORK/helper.json" 2>"$WORK/helper.stderr"
 helper_rc=$?

@@ -11,20 +11,44 @@ use std::time::Instant;
 
 use ra_ap_cfg::{CfgAtom, CfgDiff};
 use ra_ap_hir::{HasSource, Semantics};
-use ra_ap_ide::{AnalysisHost, CallHierarchyConfig, FilePosition};
+use ra_ap_ide::{
+    Analysis, AnalysisHost, AssistResolveStrategy, CallHierarchyConfig, DiagnosticsConfig,
+    FilePosition, Severity,
+};
 use ra_ap_ide_db::ra_fixture::RaFixtureConfig;
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_intern::sym;
 use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
-use ra_ap_paths::AbsPathBuf;
+use ra_ap_paths::{AbsPath, AbsPathBuf};
 use ra_ap_project_model::{CargoConfig, CfgOverrides, RustLibSource};
 use ra_ap_syntax::ast::HasName;
 use ra_ap_syntax::AstNode;
+use ra_ap_vfs::Vfs;
+
+/// Exit codes. Deliberately mirrored on Go's convention rather than the
+/// (inverted) convention this binary shipped with before Task C: a soft,
+/// data-driven refusal (`computable:false` — no cargo project, no roots,
+/// type errors) is a REAL ANSWER, not an error, so it exits 0 just like a
+/// successful Output does; only usage misuse (a missing argument) — which
+/// never even attempts analysis — gets a distinct nonzero code. Consistent
+/// with Go's own split (refuse with 0, arg misuse with 2) so a future
+/// magma-side Rust backend can drive both binaries identically.
+const EXIT_USAGE: i32 = 2;
 
 fn main() -> anyhow::Result<()> {
-    let root = std::env::args().nth(1).expect("usage: helper <workspace-root>");
     let use_outgoing = std::env::args().any(|a| a == "--outgoing");
     let t0 = Instant::now();
+
+    // Contract defect 2 (missing argument): previously `.expect(..)`, which
+    // panics (exit 101) with no JSON at all — magma's contract requires
+    // every soft-refusal path to emit a machine-readable `Refusal`, and a
+    // panic is not that. Nothing has executed yet at this point, so
+    // `executed_target_code` is honestly `false`.
+    let Some(root) = std::env::args().nth(1) else {
+        let r = model::Refusal::new(false, "usage: helper <workspace-root> [--outgoing]");
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        std::process::exit(EXIT_USAGE);
+    };
 
     let mut cargo_config = CargoConfig::default();
     cargo_config.sysroot = Some(RustLibSource::Discover);
@@ -46,8 +70,25 @@ fn main() -> anyhow::Result<()> {
     let executed_target_code = load_config.load_out_dirs_from_check
         && load_config.with_proc_macro_server != ProcMacroServerChoice::None;
 
+    // Contract defect 2 (not a cargo project / workspace load failure):
+    // previously `?` propagated straight into anyhow, printing `Error: ...`
+    // and exiting 1 with no JSON. `load_workspace_at` fails at
+    // `ProjectManifest::discover_single` or `ProjectWorkspace::load` — both
+    // BEFORE it runs build scripts (see `run_build_scripts`, called only
+    // after both succeed) — so `executed_target_code` is honestly `false`
+    // here: nothing of the target's own code ran.
     let (db, vfs, _p) =
-        load_workspace_at(Path::new(&root), &cargo_config, &load_config, &|_s| {})?;
+        match load_workspace_at(Path::new(&root), &cargo_config, &load_config, &|_s| {}) {
+            Ok(v) => v,
+            Err(e) => {
+                let r = model::Refusal::new(
+                    false,
+                    format!("not a computable cargo workspace: {e:#}"),
+                );
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                std::process::exit(0);
+            }
+        };
     eprintln!("TIMING load_workspace: {:.1}s", t0.elapsed().as_secs_f64());
 
     // Same absolute-path computation load_workspace_at uses internally, so
@@ -81,12 +122,45 @@ fn main() -> anyhow::Result<()> {
         funcs.len()
     );
 
-    if !funcs.iter().any(|(n, _)| n.root) {
+    // Contract defect 2 (workspace with type/load errors): `load_workspace_at`
+    // does NOT type-check on load — verified directly: a crate with a plain
+    // type error (`let x: i32 = "not a number";`) loads and enumerates
+    // cleanly with the code as it stood before this fix, producing a full,
+    // silently-wrong Output rather than any refusal at all. magma's contract
+    // must never hand back a partial or degraded map, so scan every
+    // workspace-local real source file for a Severity::Error diagnostic
+    // (RA's own semantic diagnostics — type mismatches, unresolved paths,
+    // etc.) and refuse before ever reaching the roots/edges computation.
+    // `executed_target_code` is honestly `true` here: `load_workspace_at`
+    // already succeeded, running build scripts and expanding proc macros.
+    let error_files =
+        workspace_type_errors(&analysis, &vfs, root_abs.as_path(), target_dir_abs.as_path())?;
+    if !error_files.is_empty() {
         let r = model::Refusal::new(
+            executed_target_code,
+            format!(
+                "{} file(s) contain type/load errors; reachability not computable: {}",
+                error_files.len(),
+                error_files.join(", ")
+            ),
+        );
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        std::process::exit(0);
+    }
+
+    if !funcs.iter().any(|(n, _)| n.root) {
+        // Contract defect 1: `load_workspace_at` above already ran build
+        // scripts and expanded proc macros by the time this fires, so
+        // `executed_target_code` (computed from the actual load config, not
+        // a hard-coded constant) is honestly `true` here — a refusal is not
+        // automatically "nothing executed". Exit 0, not 2 (see EXIT_USAGE):
+        // this is a real, computable answer, matching Go's convention.
+        let r = model::Refusal::new(
+            executed_target_code,
             "no roots in scope (no binary target and no public API); reachability not computable",
         );
         println!("{}", serde_json::to_string_pretty(&r)?);
-        std::process::exit(2);
+        std::process::exit(0);
     }
 
     let index: HashMap<ra_ap_hir::Function, u32> =
@@ -154,6 +228,50 @@ fn discover_target_dir(root_abs: &AbsPathBuf) -> anyhow::Result<AbsPathBuf> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("cargo metadata output missing target_directory"))?;
     Ok(AbsPathBuf::assert_utf8(std::path::PathBuf::from(target_directory)))
+}
+
+/// Repo-relative paths of every workspace-local `.rs` file (real files under
+/// `root`, excluding `target_dir` — the same universe `enumerate::collect`
+/// draws function nodes from, but at file granularity so a file with zero
+/// functions, e.g. a struct-only file with a type error, is still covered)
+/// carrying at least one `Severity::Error` diagnostic from rust-analyzer's
+/// own semantic analysis. `load_workspace_at` never runs full type-checking
+/// on load, so a workspace with genuine type/load errors otherwise loads and
+/// enumerates as if nothing were wrong (confirmed directly: `let x: i32 =
+/// "not a number";` produces a normal, silently-wrong Output with no
+/// refusal). `Severity::Error` only — warnings and style lints are not
+/// load/type errors and refusing on those would over-refuse a perfectly
+/// computable workspace. `disable_experimental`/`style_lints: false` for the
+/// same reason: only RA's core, non-experimental diagnostics gate this.
+fn workspace_type_errors(
+    analysis: &Analysis,
+    vfs: &Vfs,
+    root: &AbsPath,
+    target_dir: &AbsPath,
+) -> anyhow::Result<Vec<String>> {
+    let config = DiagnosticsConfig {
+        style_lints: false,
+        disable_experimental: true,
+        ..DiagnosticsConfig::test_sample()
+    };
+    let mut bad_files = Vec::new();
+    for (file_id, vfs_path) in vfs.iter() {
+        let Some(p) = vfs_path.as_path() else { continue };
+        if !p.starts_with(root) || p.starts_with(target_dir) {
+            continue;
+        }
+        if p.extension() != Some("rs") {
+            continue;
+        }
+        let diags = analysis
+            .full_diagnostics(&config, AssistResolveStrategy::None, file_id)
+            .map_err(|_| anyhow::anyhow!("diagnostics computation was cancelled"))?;
+        if diags.iter().any(|d| d.severity == Severity::Error) {
+            bad_files.push(enumerate::repo_relative_path(vfs, root, file_id));
+        }
+    }
+    bad_files.sort();
+    Ok(bad_files)
 }
 
 fn pos_of(db: &RootDatabase, f: ra_ap_hir::Function) -> Option<FilePosition> {
