@@ -165,12 +165,21 @@ that are absolute paths into the Go build cache (`~/Library/Caches/go-build/<has
 build-cache stubs — test-binary `main`/`init#1` and cgo shims. 12 such nodes when magma analyzes
 itself, 201 for roboticus.
 
-- Every one is `generated: true` (12/12 and 201/201, zero exceptions), so filtering `generated`
-  removes them completely.
+- Every one is `generated: true` (12/12 and 201/201, zero exceptions). **But do not brief consumers
+  that this makes them invisible.** That is a property of the data, not of any consumer's filter.
+  Architext's visibility predicate is a **union** — `(show_prod_reachable && prod_reachable) || …
+  || (show_generated && generated)` — so a node that is *both* `prod_reachable` and `generated` is
+  admitted by the first clause and the `generated` toggle never vetoes it. They measured **9 of the
+  201 still visible** in their default view (cgo shims like `_Cfunc_free`, each rendering a
+  `/Users/jmachen/Library/Caches/go-build/…` path in their inspector). I had asserted the filter
+  was complete protection; it is not, and that correction came from them, not from me.
 - **Same-machine determinism is intact** — three `--force` runs byte-identical.
 - **Cross-machine determinism is not**, because the path embeds a username and a platform-specific
   cache root. `--architext` writes into the repo's own `docs/architext/data/`, which is git-tracked
-  in roboticus, so committing it would commit a developer's home directory path.
+  in roboticus, so committing it would commit a developer's home directory path. Architext adds a
+  second consequence: their layout cache is keyed on `(sha, tree, tier)`, so two developers at one
+  SHA producing different bytes would either serve a stale cached layout or thrash it. It does not
+  bite today only because their positions derive from graph structure rather than paths.
 
 Architext has been told, has validated both sample artifacts clean, and needs nothing. Samples are
 at `~/magma-samples/` (magma `755e0b1`, and roboticus `1e5d69f8` with 23 real dead + 611 test-only
