@@ -87,6 +87,30 @@ pub struct Function {
     /// see `enumerate::is_test_context`, which computes this; it is NOT
     /// simply the `#[test]` attribute.
     pub test: bool,
+    /// Carries a literal `#[test]` attribute (`Function::is_test`) — the
+    /// NARROW signal, and the test half of any all-roots reachability seed.
+    ///
+    /// Distinct from `test` above, which is deliberately broader, and the two
+    /// are not interchangeable for this purpose: seeding a BFS on the broad
+    /// flag makes every function merely living under `#[cfg(test)]` ancestry
+    /// its own root, so it trivially "reaches" itself and a genuinely dead
+    /// test helper can never be reported. Seeding on `root` alone instead
+    /// loses test reachability entirely, since `roots::mark` sets `root` for
+    /// PRODUCTION entry points only.
+    ///
+    /// Exists because a consumer of this contract has no third option. The
+    /// oracle harness had already hit this and worked around it by regex-
+    /// scanning source text for `#[test]` in `scripts/oracle-diff.sh` — a
+    /// consumer reading only the JSON cannot do that, so the signal belongs
+    /// on the wire. `bench` next to it was always the narrow attribute
+    /// signal; this makes the pair symmetric.
+    ///
+    /// A new FIELD on `magma-rust-helper/1`, which is the helper->magma
+    /// contract and internal. It is NOT on the Architext-facing
+    /// `magma-code-graph/1` (whose root is `additionalProperties: false`), so
+    /// it needs no coordination — see the mapping boundary in
+    /// `internal/backend/rust.go`, which strips it.
+    pub test_entry: bool,
     /// An entry point: a bin `main`, or a lib `pub` item. Set in Task 5.
     pub root: bool,
     /// Benchmark function (`Function::is_bench`) — counts toward all-roots only.

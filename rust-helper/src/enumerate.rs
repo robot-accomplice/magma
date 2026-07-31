@@ -230,6 +230,8 @@ fn push_const(
             kind: "init".to_owned(),
             exported: c.visibility(db) == Visibility::Public,
             test,
+            // A const/static item cannot carry #[test]; see model::Function::test_entry.
+            test_entry: false,
             // Runs whenever the enclosing (non-test) binary starts, so
             // whatever it calls is genuinely reachable -- same reasoning as
             // Go's synthesized `init#N` nodes, always roots. `!test`, not
@@ -321,6 +323,8 @@ fn push_static(
             kind: "init".to_owned(),
             exported: s.visibility(db) == Visibility::Public,
             test,
+            // A const/static item cannot carry #[test]; see model::Function::test_entry.
+            test_entry: false,
             root: !test, // see push_const's comment on the same field
             bench: false,
             generated: is_macro_kind_synthetic(db, src.file_id)
@@ -642,6 +646,9 @@ fn push(
             kind: if f.self_param(db).is_some() { "method" } else { "func" }.to_owned(),
             exported: f.visibility(db) == Visibility::Public,
             test,
+            // NARROW #[test] signal, unlike `test` above — see
+            // model::Function::test_entry for why both are needed.
+            test_entry: f.is_test(db),
             root: false,   // Task 5
             bench: f.is_bench(db),
             // H1 fix: anchored to the workspace's OWN target directory
