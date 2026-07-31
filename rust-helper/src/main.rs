@@ -274,8 +274,14 @@ fn analyze_one_config(
     // `run_build_scripts`, called only after both succeed) — so
     // `executed_target_code` is honestly `false` here: nothing of the
     // target's own code ran.
+    // The load's own progress, forwarded to stderr rather than discarded. It
+    // is the ONLY signal available during the longest phase of a run: loading
+    // a large workspace has been measured at 769.8s for a single config, and
+    // the TIMING line below is not printed until that whole phase is over. A
+    // caller (see internal/backend/rust.go) surfaces these as live progress, so
+    // a magma run on a real Rust repo is not silent for ten-plus minutes.
     let (db, vfs, _p) =
-        match load_workspace_at(Path::new(root), &cargo_config, load_config, &|_s| {}) {
+        match load_workspace_at(Path::new(root), &cargo_config, load_config, &progress_to_stderr) {
             Ok(v) => v,
             Err(e) => {
                 return Ok(LoadOutcome::Refused(model::Refusal::new(
@@ -580,6 +586,18 @@ fn run_outgoing_mode(
     }
     eprintln!("MODE outgoing_calls ({edges} edges)");
     Ok(())
+}
+
+/// Prefix marking a line on stderr as live progress rather than a diagnostic.
+/// Machine-readable on purpose: `internal/backend/rust.go` matches it to decide
+/// what to surface, so unprefixed stderr (cargo noise, build-script output)
+/// cannot be mistaken for a progress label.
+const PROGRESS_PREFIX: &str = "PROGRESS ";
+
+/// Forwards `load_workspace_at`'s own progress to stderr. stdout carries the
+/// JSON contract and must stay clean, so this can only go to stderr.
+fn progress_to_stderr(stage: String) {
+    eprintln!("{PROGRESS_PREFIX}{stage}");
 }
 
 /// Resolves the workspace's actual target directory via `cargo metadata`

@@ -1,12 +1,15 @@
 package backend
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/robot-accomplice/magma/internal/contract"
 	"github.com/robot-accomplice/magma/internal/detect"
@@ -71,18 +74,27 @@ func (rustBackend) BuildGraph(repo string, meta contract.Meta, progress Progress
 	}
 
 	step("analyzing workspace (two cargo configs)")
-	out, err := exec.Command(bin, repo).Output()
-	if err != nil {
+	// Loading a large workspace has been measured at 769.8s for ONE of the two
+	// configs, so the helper's stderr progress is forwarded live rather than
+	// discarded — without it a magma run sits on a single label for ten-plus
+	// minutes and is indistinguishable from a hang. stderr is also buffered,
+	// because it is the only diagnostic available if the helper fails.
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, repo)
+	cmd.Stdout = &stdout
+	cmd.Stderr = io.MultiWriter(&stderr, &progressLines{fn: step})
+	if err := cmd.Run(); err != nil {
 		// The helper reserves nonzero exits for usage misuse; a data-driven
 		// refusal exits 0 WITH a JSON envelope (its own EXIT_USAGE comment
 		// documents the split, deliberately mirroring Go's). So a nonzero exit
 		// here is a genuine failure to run, not an answer.
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return g, fmt.Errorf("rust helper %s exited %d: %s", bin, ee.ExitCode(), ee.Stderr)
+			return g, fmt.Errorf("rust helper %s exited %d: %s", bin, ee.ExitCode(), stderr.String())
 		}
 		return g, fmt.Errorf("running rust helper %s: %w", bin, err)
 	}
+	out := stdout.Bytes()
 
 	step("mapping helper output")
 	var env helperEnvelope
@@ -138,6 +150,37 @@ func (rustBackend) BuildGraph(repo string, meta contract.Meta, progress Progress
 	g.Nodes = nodes
 	g.Edges = edges
 	return g, nil
+}
+
+// helperProgressPrefix marks a helper stderr line as a live progress label.
+// Matching an explicit prefix rather than forwarding all of stderr keeps cargo
+// noise and build-script output — which the helper genuinely executes — from
+// being surfaced to the user as if it were magma's own progress.
+const helperProgressPrefix = "PROGRESS "
+
+// progressLines is an io.Writer that calls fn once per COMPLETE line carrying
+// helperProgressPrefix. Buffering the tail matters: a Write boundary can fall
+// mid-line, and reporting half a label (or reporting it twice) would be worse
+// than not reporting it.
+type progressLines struct {
+	buf []byte
+	fn  func(string)
+}
+
+func (w *progressLines) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := string(bytes.TrimSpace(w.buf[:i]))
+		w.buf = w.buf[i+1:]
+		if s, ok := strings.CutPrefix(line, helperProgressPrefix); ok && s != "" {
+			w.fn(s)
+		}
+	}
+	return len(p), nil
 }
 
 // findRustHelper resolves the helper binary, preferring an explicit
