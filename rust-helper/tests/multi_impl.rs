@@ -15,9 +15,19 @@
 //! here reports false dead code, which is the one failure magma exists to
 //! prevent.
 //!
-//! This test pins reachability by id, not by name: `Dog::speak` and
-//! `Cat::speak` share the symbol `"speak"`, so only ids (and the line
-//! numbers used here to look them up) distinguish them.
+//! This test pins reachability by id, not by name. It used to say the two
+//! impls "share the symbol `speak`", which was true when it was written and
+//! is not any more: contract defect 5 qualified symbols, so they are now
+//! `<Dog as Speak>::speak` and `<Cat as Speak>::speak`, and the trait's own
+//! declaration is `Speak::speak`. The (symbol, line) lookup below is kept
+//! anyway — it is now redundant for disambiguation but asserts the
+//! qualification itself, which is the property that made it redundant.
+//!
+//! **This test was silently red for 26 commits.** Symbol qualification landed
+//! in `f20e513`, 42 commits after this file was last touched, and nothing ran
+//! `cargo test` — the CI workflow gated `gofmt`, `go vet` and the Go tests and
+//! never built rust-helper at all. The Rust CI job added alongside this fix is
+//! what stops that recurring; a test nothing runs is not a test.
 //!
 //! Must be run against the release binary (`cargo test --release`) per the
 //! project rule: never validate this helper with a debug build.
@@ -45,8 +55,7 @@ fn cat_target_reachable_from_main_via_dyn_dispatch() {
     let functions = graph["functions"].as_array().expect("functions array");
     let calls = graph["calls"].as_array().expect("calls array");
 
-    // Disambiguate by (symbol, line): `speak` is declared twice (Dog's impl,
-    // then Cat's), one line apart, and only the id tells them apart.
+    // (symbol, line) pins BOTH the id lookup and the qualified-symbol form.
     let id_at = |symbol: &str, line: u64| -> u32 {
         functions
             .iter()
@@ -56,7 +65,7 @@ fn cat_target_reachable_from_main_via_dyn_dispatch() {
             .unwrap() as u32
     };
     let main_id = id_at("main", 8);
-    let cat_speak_id = id_at("speak", 5); // impl Speak for Cat
+    let cat_speak_id = id_at("<Cat as Speak>::speak", 5); // impl Speak for Cat
     let cat_target_id = id_at("cat_target", 7);
 
     let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();

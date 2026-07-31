@@ -184,6 +184,12 @@ fn is_init_cfg_test<T: HasAttrs + Copy>(
 /// comment: needing the raw `FileId` back for the `generated` check, not
 /// just a repo-relative string, is what stops this from calling `decl_loc`
 /// directly).
+/// `too_many_arguments`: the extra parameters are the invariant analysis
+/// context (`db`, `sema`, `vfs`, `root`, `target_dir`) that every enumeration
+/// helper on this path threads. Bundling them into a context struct is a
+/// worthwhile refactor of `enumerate.rs` as a whole, not something to do to one
+/// function while leaving its three siblings inconsistent.
+#[allow(clippy::too_many_arguments)]
 fn push_const(
     db: &RootDatabase,
     sema: &Semantics<'_, RootDatabase>,
@@ -289,6 +295,8 @@ fn push_const(
 /// exists) and a static never being an associated item (Rust has no
 /// associated statics), so its symbol is always the unqualified `qualify_stem`
 /// fallback.
+/// `too_many_arguments`: see `push_const`.
+#[allow(clippy::too_many_arguments)]
 fn push_static(
     db: &RootDatabase,
     sema: &Semantics<'_, RootDatabase>,

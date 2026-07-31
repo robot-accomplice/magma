@@ -609,6 +609,9 @@ fn walk<'db>(
 /// unresolved at this call site, a primitive, or a foreign type with no
 /// local impl to find anyway) yields no edge — a missed edge, not a
 /// false-dead one: the safe direction.
+/// `too_many_arguments`: same invariant-context threading as `walk` itself,
+/// which this is called from and shares parameters with.
+#[allow(clippy::too_many_arguments)]
 fn push_trait_method_edges<'db>(
     sema: &Semantics<'db, RootDatabase>,
     n: &SyntaxNode,
