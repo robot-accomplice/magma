@@ -714,3 +714,71 @@ identical config measured at 176.7s and >633s on repeat (>3.6× spread under loa
 **Separately worth deciding:** 28 minutes is a real UX fact for a magma run on a large Rust repo,
 independent of any regression. Live progress now reports through (commit `887effc`), so it no
 longer LOOKS hung, but the wall-clock cost should be stated in the README before release.
+
+---
+
+# RUNTIME ANSWERED — measured 2026-07-31, `roboticus-rust`, instrumented
+
+The phase instrumentation (`de1a806`) answered this in one run, and **the answer falsifies the
+hypothesis this document was carrying.** Recorded here because the wrong guess is instructive.
+
+```
+prod-config (cfg(test) off) 678.8s      test-config (cfg(test) on) 1021.7s
+  load                 7.1s               load                 5.9s
+  enumerate+roots     56.1s (5110 fns)    enumerate+roots     48.9s (10651 fns)
+  diagnostics        549.1s               diagnostics        863.2s
+  walk (bodies)       62.0s (11026 e)     walk (bodies)       95.0s (24629 e)
+  walk (initializers)  0.1s               walk (initializers)  0.2s
+merge 0.2s     TOTAL 1700.8s
+```
+
+| phase | total | share |
+|---|---|---|
+| **diagnostics** (`workspace_type_errors`) | **1412.3s** | **83.0%** |
+| walk — ALL of family B's desugaring | 157.0s | 9.2% |
+| enumerate+roots | 105.0s | 6.2% |
+| load | 13.0s | 0.8% |
+| merge | 0.2s | 0.0% |
+
+## The drop arm was the wrong suspect
+
+This document previously named family B's drop arm (per-expression `type_of_expr`) as "the
+specific risk, which is real and identified". **That was a hypothesis, and it is now bounded out
+of relevance.** The ENTIRE walk phase — every desugaring form, operators, `for`, `await`, format
+args, `?`, and the drop arm together — is 9.2% of runtime. The drop arm is some fraction of that.
+`roboticus-rust` has 12 local `Drop` impls, so the arm was genuinely active; it is simply not where
+the time goes.
+
+**Do not apply the scoped mitigation** (restricting the arm to value-producing expression forms).
+It would cost precision and buy at most a few percent. Left unapplied deliberately.
+
+## The real cost is the type-error diagnostic scan
+
+`main::workspace_type_errors` calls `Analysis::full_diagnostics` per workspace-local `.rs` file, in
+BOTH configs. That is 83% of a 28-minute run. It was added as contract defect 2's fix — refuse
+rather than emit a partial map when a workspace does not type-check — so it is correctness-critical
+and must not simply be deleted.
+
+This document previously listed "the type-error refusal's per-file diagnostic scan is unmeasured on
+a large workspace" as an open residual. **It is now measured, and it is the dominant cost.**
+
+**Leads, not conclusions — none of these has been tried:**
+1. `load_out_dirs_from_check: true` already runs `cargo check` during load. If cargo's own
+   diagnostics can be captured there, the separate RA pass may be redundant or much cheaper.
+2. It runs in both configs. The two are not identical (cfg(test) code only exists in one), but the
+   prod-config file set is largely a subset — scanning only what the second config adds could save
+   most of the 863.2s half.
+3. `full_diagnostics` computes every diagnostic; only `Severity::Error` is consulted. A narrower
+   query, if one exists at the pin, would avoid computing what is then discarded.
+4. It is a per-file loop with no parallelism, on a machine that showed `user 1286s` against
+   `real 1701s` — i.e. largely single-threaded.
+
+## Method notes
+
+Two independent full runs, **1688.8s and 1700.8s — 0.7% apart**, despite the first being contended
+with the fixture suite. That is a genuinely reproducible total, and it retires the earlier concern
+that contention made the first number unusable. It does NOT retire the standing rule that one
+sample is not a measurement; it means these two agree.
+
+Node/edge counts also reproduced exactly across both runs (10,921 functions, 24,611 calls), which
+is independent evidence for the determinism claim on a real workspace rather than a fixture.
