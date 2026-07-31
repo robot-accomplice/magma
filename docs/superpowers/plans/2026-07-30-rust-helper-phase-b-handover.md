@@ -1,16 +1,18 @@
 # Rust helper — Phase B handover
 
 > # ▶ START AT THE BOTTOM
-> **Jump to "FINAL HANDOFF — 2026-07-31" at the end of this document.** It is the current state
-> and it supersedes everything above it. The sections in between are the historical record of how
-> the findings were reached — useful for *why*, misleading for *what is true now*.
+> **Jump to "SESSION 2026-07-31 (later)" at the end of this document.** It is the current state
+> and it supersedes everything above it — including the section titled "FINAL HANDOFF", which was
+> final only for the session that wrote it. Everything before it is the historical record of how
+> the findings were reached: useful for *why*, misleading for *what is true now*.
 >
-> One-line status: Phase B closed the oracle pipeline, all five contract defects, and families
-> A, C, D, E, plus 5 of 6 desugaring forms. **Remaining: family F's workspace-root assertion,
-> the `?` and `Drop` desugaring gaps, and the magma-side wiring + a fresh adversarial review.**
+> One-line status: Phase B closed the oracle pipeline, all five contract defects, and **all six
+> families A–F**, including the `?` and `Drop` desugaring gaps. 15/15 fixtures pass.
+> **Remaining: the magma-side wiring, and a fresh adversarial review.**
 > Per the user: **the release does not happen until all of it is done.**
 
-**Originally written 2026-07-30 at `df8cba4`. Phase B is COMPLETE-BUT-FOR the three items above.**
+**Originally written 2026-07-30 at `df8cba4`. Code complete through `23d2a95`; wiring and review
+remain.**
 
 Read this with `docs/superpowers/plans/2026-07-29-rust-helper.md` — specifically its final section,
 "Plan A outcome: DO NOT SHIP", which is the authoritative finding list. This document is the
@@ -432,3 +434,114 @@ across 17,871 real roboticus functions, including the non-obvious `10,011 → 79
 soon and that a real emit will be sent for validation before wiring — a process now three-for-three
 at catching defects pre-ship (`tree` carrying the SHA, `executed_target_code` as a new property,
 and the union-filter correction).
+
+---
+
+# SESSION 2026-07-31 (later) — families F and B fully closed
+
+**This section supersedes the FINAL HANDOFF above.** Two commits on
+`feat/rust-helper-extraction`: `d042e3e` (family F) and `23d2a95` (family B's `?` and `Drop`).
+**15/15 fixtures pass**, determinism re-verified (three runs each on three fixtures,
+byte-identical). No exclusion was widened to make anything green except the one deliberate,
+measured case recorded below.
+
+## Family F — closed, and it was worse than filed
+
+Filed as a metadata blemish. Reproducing it from actual output first (rather than fixing from the
+description) surfaced two further defects:
+
+1. **Every builtin derive**, not just `Debug`. A six-derive probe put 7 of 9 nodes in the sysroot —
+   `clone.rs`, `cmp.rs` (twice), `default.rs`, `hash/mod.rs`, `fmt/mod.rs`.
+2. **Silent node loss and fabricated cross-crate edges.** The resolved location is the *trait's own
+   method declaration* — `core/src/fmt/mod.rs:1084` is literally
+   `fn fmt(&self, f: &mut Formatter<'_>) -> Result;` — so it is a per-trait CONSTANT shared by every
+   deriving type in the workspace. Two crates each with `#[derive(Debug)] pub struct Widget`
+   produced byte-identical `node_key`s: one node vanished in `merge_configs`, and
+   `remap_and_aggregate` rewrote the survivor's id over both, giving
+   `EDGE a::show -> b::<Widget as Debug>::fmt` where crate `a` formats its *own* `Widget`.
+   Reproduced on a two-crate probe.
+
+Root cause for all of it, verified not inferred: rust-analyzer resolves a builtin-derive method's
+`source(db)` to the sysroot trait declaration with `macro_file()` returning `None`, so the item
+looks like an ordinary file to every macro-kind check — which is also why `generated` read `false`.
+
+**Fixes.** `enumerate::relocate_out_of_root` moves an out-of-root node onto local source (impl
+block, else the self type's declaration), accepting a candidate only if it lands inside the
+workspace. Per-type rather than per-trait, so the collision dissolves at source. `pkg` added to
+`main::node_key` as defence in depth. `main::non_local_paths` **refuses** the run if any emitted
+`file`/`site_file` still escapes the workspace root — a reachability fixture can structurally never
+catch this class, so a direct assertion is the only instrument that sees it, and refusal (not
+filtering) because a drop would be a silent exclusion.
+
+**The one deliberate exclusion-boundary movement in Phase B.** Relocated nodes now report
+`generated: true`, which moves them from `considered` into `excluded`. It cannot hide a FATAL:
+measured on a probe whose `Widget` derives Debug/Clone/PartialEq/Default/Hash/PartialOrd with every
+one unused, `cargo check --message-format=json` reports **zero** `dead_code` diagnostics. rustc
+structurally cannot flag a derived impl dead, so those nodes were permanently `agree_live` before
+and are permanently un-flaggable after. `toolchain_derive`'s baseline carries the measurement.
+
+## Family B — `?` and `Drop` both closed
+
+Each got a fixture **confirmed RED first** by parking the fix and rebuilding, never by inference.
+Both closed by finding real edges: `excluded` is 0 in both fixtures.
+
+- **`?` (`testdata/try_from`, was 1 FATAL both configs).** Closed type-directedly, the same route
+  format args takes. `edges()` computes the enclosing function's error type once
+  (`try_error_type`, gated on the return type actually being `core::result::Result` resolved
+  through the crate graph, never name-matched) and threads it into `walk`. **No pin bump was
+  needed** — `Type::type_arguments` exists at `0.0.343`, so the handover's "targeted lookup or bump
+  the pin" resolves to the first option, and the pin stays load-bearing and untouched.
+
+- **`Drop` (`testdata/drop_glue`, was 4 FATALs both configs).** **The previous reading was wrong
+  and this is worth keeping.** It was recorded as catchable only by move/liveness analysis, because
+  no FATAL seemed producible. But rustc's `dead_code` lint never reports a trait-impl method at
+  all, so it says nothing about `drop` either way — what it DOES report is drop's *transitive
+  callee*. Measured on a probe carrying both a constructed and a never-constructed `Drop` type,
+  rustc emitted `struct NeverConstructed is never constructed` and `function cleanup_never is never
+  used`, and stayed silent about both `drop`s. The divergence is observable one hop past `drop`.
+
+  Closed by resolving from the TYPES occurring in a body. **Transitivity is the load-bearing
+  half**: a `#[derive(Default)] struct Outer { inner: Inner }` with `Inner: Drop` puts `Inner` in no
+  expression anywhere in the program, yet `inner_cleanup` genuinely runs and rustc agrees it is
+  live — measured on a probe, then folded into the fixture. `drop_glue_map` expands each ADT
+  through its owned field types (following generic arguments, so a `Vec<Inner>` field yields
+  `Inner`) with a `seen` set for cyclic types. Crates with no local `Drop` impl get an empty map and
+  skip the per-expression type lookup entirely.
+
+## What remains
+
+1. **magma-side wiring.** `detect.Rust` and `Cargo.toml` detection already exist; only
+   `internal/backend/rust.go` is missing. **Decided this session: PATH lookup with honest refusal**
+   — the backend looks for the helper on `PATH` (or `MAGMA_RUST_HELPER`) and refuses with an
+   install hint when absent. Keeps `go install` working and needs no release-pipeline change.
+   - **`README.md:49-50` must change.** It currently claims "The only runtime requirement is a
+     working `go` toolchain … no third-party analyzer binaries to install." True for Go, false the
+     moment Rust is wired. Scope the claim to Go and state the Rust helper requirement.
+   - **The strip-list is enforced structurally, not by convention** — `contract.Node` has no
+     `column`, `bench`, `trait_impl`, or `macro_truncated` field, so those cannot leak to Architext.
+     Only `kind: "init"` reaches the wire, and a new *value* is one-sided. Confirm at review.
+   - **`Reachable`/`ProdReachable` are magma's to compute, not the helper's.** Go derives them from
+     `rta.Result`, so there is NO reusable BFS in `internal/contract` — the Rust backend needs its
+     own, over `root && !test` for prod and all roots for total.
+2. **A fresh three-lens adversarial review.** The last one found six families that three tasks'
+   worth of green gates had missed. This session found three more defects that a 13/13 green gate
+   had also missed. A green gate is necessary, not sufficient.
+
+## Open residuals — carried forward, none newly introduced
+
+- **`root`/`exported` over-report for derived methods.** rust-analyzer reports a derive-synthesized
+  method's own Visibility as Public even for a fully private type, tripping `roots.rs`'s
+  `all_ancestors_public` fallback. Both fail toward live. **Not fixed here deliberately**: roots may
+  not be tightened while format-args and `for`-loop resolution still cover only concrete-`Adt`
+  types.
+- **A genuinely-dead trait-impl method always reads "live" to this harness**, because rustc's
+  `dead_code` never reports trait-impl methods. General to trait impls, not specific to `Drop`.
+  `testdata/drop_glue` deliberately omits a never-constructed `Drop` type for this reason.
+- **`cargo fmt` is not clean** across `roots.rs`/`walk.rs`/`main.rs`/`enumerate.rs` — pre-existing,
+  and CI gates Go only (`gofmt`), never Rust. **Rust has no CI coverage at all**; it should get some
+  as part of wiring.
+- Contract residuals unchanged: `cfg_requires_test` does not handle `any(test, …)`/`not(…)`;
+  `tests/`/`benches/` detection is path-component-based rather than real Cargo target metadata.
+- **Pre-existing target-dir anchoring gap** for excluded nested sub-projects (a `cargo-fuzz` crate)
+  causes a refusal on `roboticus-rust`. Unrelated, unfixed, needs its own task.
+- **Go-side path leak** (`--architext` emitting build-cache absolute paths) still needs its own task.
