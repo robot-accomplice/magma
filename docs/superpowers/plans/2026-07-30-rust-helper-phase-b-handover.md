@@ -882,3 +882,41 @@ probe crate would settle it.
 > text. Family G's first hop was invisible because `oracle-diff.sh` excluded it. In both cases the
 > harness had coped, and coping is what stopped anyone noticing the contract could not. **When the
 > harness needs a workaround, ask what a second consumer would do without it.**
+
+---
+
+# ARCHITEXT SAMPLE — first real Rust emit, ready to send
+
+`~/magma-samples/code-graph-roboticus-rust-7e5f0d6d.json` (15 MB), generated at magma `4695965`
+against `roboticus-rust` at a **clean** tree. Alongside the two existing Go samples.
+
+```
+roboticus-rust   rust · 7e5f0d6d
+nodes 10,921   edges 24,611   dead code 59   test-only 21
+```
+
+**Cross-validation worth noting:** 59 dead rows is exactly what an independent offline BFS over the
+helper's own output predicted for the correct (`root || test_entry || bench`) seed, computed before
+the backend existed. Two implementations written separately agreeing to the row is the same kind of
+evidence the Go/Architext badge reconciliation gave.
+
+Validated on every axis that has previously caught a defect:
+
+| check | result |
+|---|---|
+| `contract_version` | `magma-code-graph/1` |
+| `fidelity` | `semantic` (settled, one-sided — Architext's schema is `{"type":"string"}`) |
+| `executed_target_code` | **`true`** — the field that was being parsed and dropped until this session |
+| `tree` | `clean`, not dirty |
+| absolute paths in `file` | **0** |
+| any mention of the home directory | **0** |
+| `column`/`bench`/`trait_impl`/`macro_truncated`/`test_entry` | **absent** — strip enforced by `contract.Node` having no such fields |
+
+**The Rust artifact does NOT have the Go-side path leak.** That separate open defect (`--architext`
+emitting build-cache absolute paths for Go build stubs, 201 nodes on roboticus, cross-machine
+non-deterministic) has no counterpart here: zero absolute paths across 10,921 nodes. The Go task
+still stands on its own.
+
+**Not sent.** Transmitting this is an outward-facing action and is the user's to take. Everything
+needed is above; the process of sending a real emit for validation before wiring is three-for-three
+at catching defects pre-ship, so it is worth doing before release.
