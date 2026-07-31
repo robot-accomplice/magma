@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use ra_ap_hir::{
-    AsAssocItem, AssocItem, AssocItemContainer, Crate, HasSource, Impl, ModuleDef,
+    Adt, AsAssocItem, AssocItem, AssocItemContainer, Crate, HasSource, Impl, ModuleDef,
     PathResolution, ScopeDef, Semantics, Trait,
 };
 use ra_ap_ide_db::base_db::{CrateOrigin, LangCrateOrigin};
@@ -51,6 +51,29 @@ use crate::model;
 /// still happens, which a numeric limit — of any size — never can.
 const MACRO_DEPTH_LIMIT: usize = 64;
 
+/// Facts about the body being walked that the Family B desugaring arms need
+/// and cannot recover from a syntax node on their own. Bundled rather than
+/// threaded as separate parameters purely to keep `walk`'s already-long
+/// argument list from growing once per desugaring form.
+///
+/// Both are computed ONCE per body in `edges()` — neither varies within one
+/// walk, and both are pure lookups whose cost would otherwise be paid per
+/// visited node.
+struct BodyCtx<'a, 'db> {
+    /// `E` in the enclosing function's `-> Result<_, E>`: the target type of
+    /// the implicit `From::from` conversion `?` performs. `None` for any
+    /// other return type, and for a const/static initializer. See
+    /// `try_error_type` and `walk`'s `TryExpr` arm.
+    err_ty: Option<&'a ra_ap_hir::Type<'db>>,
+    /// For each workspace-local ADT, every workspace-local `Drop::drop` that
+    /// dropping a value of that type can reach — including transitively, via
+    /// owned fields. Empty for the overwhelmingly common case of a crate with
+    /// no `Drop` impl at all, which is what makes `walk`'s per-expression
+    /// type lookup affordable: it is skipped outright when this is empty. See
+    /// `drop_glue_map`.
+    drop_glue: &'a HashMap<Adt, Vec<ra_ap_hir::Function>>,
+}
+
 /// One resolved call site before aggregation.
 struct Site {
     to: ra_ap_hir::Function,
@@ -71,6 +94,9 @@ pub fn edges<'db>(
     index: &HashMap<ra_ap_hir::Function, u32>,
 ) -> Vec<model::Call> {
     let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
+    // Whole-workspace lookup, so it is done once for the entire pass rather
+    // than per function — see `local_drop_impls`.
+    let drop_glue = drop_glue_map(db);
 
     for (node, f) in funcs.iter_mut() {
         let Some(src) = f.source(db) else { continue };
@@ -92,7 +118,11 @@ pub fn edges<'db>(
         // without needing edges() to hand back a second, easy-to-drop
         // channel of its own.
         let mut truncated = false;
-        walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated);
+        // `?`'s implicit error conversion targets THIS function's error type,
+        // so it is resolved once here rather than per `?` site.
+        let err_ty = try_error_type(db, *f);
+        let ctx = BodyCtx { err_ty: err_ty.as_ref(), drop_glue: &drop_glue };
+        walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated, &ctx);
         if truncated {
             node.macro_truncated = true;
         }
@@ -149,18 +179,28 @@ pub fn init_edges<'db>(
     for (node, src) in inits.iter_mut() {
         let mut sites = Vec::new();
         let mut truncated = false; // Family D — see edges()'s identical comment
+        // Both `BodyCtx` channels are deliberately inert for an initializer.
+        // `err_ty: None` — an initializer is not a function and has no
+        // declared return type, so there is no error type for `?` to convert
+        // INTO, and `?` cannot appear in one at all. `drop_impls: &[]` — a
+        // `static` is never dropped (it lives for the whole program), and a
+        // `const` is inlined at each USE site, so the drop that a const of a
+        // droppable type causes happens in the using function's body, which
+        // `edges()` walks. Attributing it here would put the edge on the
+        // wrong node.
+        let ctx = BodyCtx { err_ty: None, drop_glue: &HashMap::new() };
         match src {
             InitSource::Const(c) => {
                 let Some(csrc) = c.source(db) else { continue };
                 let _ = sema.parse_or_expand(csrc.file_id);
                 let Some(body) = csrc.value.body() else { continue };
-                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated);
+                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated, &ctx);
             }
             InitSource::Static(s) => {
                 let Some(ssrc) = s.source(db) else { continue };
                 let _ = sema.parse_or_expand(ssrc.file_id);
                 let Some(body) = ssrc.value.body() else { continue };
-                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated);
+                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated, &ctx);
             }
         }
         if truncated {
@@ -191,6 +231,11 @@ pub fn init_edges<'db>(
     out
 }
 
+/// `ctx` carries the enclosing body's own facts (see `BodyCtx`), threaded
+/// through the recursion rather than recomputed per node for the same reason
+/// Family D threads `truncated`: they belong to the body this walk started
+/// from, and macro descent must not lose them.
+#[allow(clippy::too_many_arguments)]
 fn walk<'db>(
     sema: &Semantics<'db, RootDatabase>,
     node: &SyntaxNode,
@@ -200,6 +245,7 @@ fn walk<'db>(
     vfs: &Vfs,
     root: &AbsPath,
     truncated: &mut bool,
+    ctx: &BodyCtx<'_, 'db>,
 ) {
     if depth > MACRO_DEPTH_LIMIT {
         // Family D: this used to be silent — an expansion cut off here is
@@ -217,7 +263,7 @@ fn walk<'db>(
     for n in node.descendants() {
         if let Some(mc) = ast::MacroCall::cast(n.clone()) {
             if let Some(exp) = sema.expand_macro_call(&mc) {
-                walk(sema, &exp.value, out, depth + 1, db, vfs, root, truncated);
+                walk(sema, &exp.value, out, depth + 1, db, vfs, root, truncated, ctx);
             }
         }
         if let Some(call) = ast::CallExpr::cast(n.clone()) {
@@ -319,6 +365,72 @@ fn walk<'db>(
             // therefore still open — see the Task B report.
             if let Some(f) = sema.resolve_try_expr(&try_expr) {
                 push_resolved(sema, &n, f, out, db, vfs, root);
+            }
+            // ...and this closes it, by the same type-directed route format
+            // args above takes rather than by resolving the (unreachable)
+            // conversion node. `err_ty` is the ENCLOSING function's error
+            // type, `E2` in `-> Result<_, E2>`; every `impl From<_> for E2`
+            // in the graph gets an edge. That over-approximates across the
+            // source type — `?` at this site converts from one specific `E1`,
+            // and this cannot tell which — but over-approximating is the safe
+            // direction (§fails toward live), and narrowing it would mean
+            // proving which `FromResidual` impl inference selected, which is
+            // precisely the thing with no exposed API here. Same shape as
+            // format args deliberately checking both `Display` and `Debug`
+            // regardless of the spec text.
+            //
+            // Costs nothing when the error types match (`-> Result<_, E>`
+            // propagating an `E`): the `From<E> for E` reflexive impl is
+            // core's blanket one, not workspace-local, so `edges`' `index`
+            // lookup drops the edge.
+            if let Some(err_ty) = ctx.err_ty {
+                if let Some(from_trait) = core_trait(db, &["convert"], "From") {
+                    push_trait_method_edges(
+                        sema, &n, err_ty, from_trait, "from", out, db, vfs, root,
+                    );
+                }
+            }
+        }
+        // Family B, last form: `Drop::drop` at scope exit. Unlike every other
+        // desugaring above, this one has NO expression node whatsoever — a
+        // value going out of scope is not written down anywhere, so there is
+        // nothing to cast to an `ast::` shape and nothing for any
+        // `Semantics::resolve_*` to key off. Resolved instead from the types
+        // appearing in the body: a value of type `T` occurring here means
+        // `<T as Drop>::drop` may run when it goes out of scope, so the edge
+        // is emitted from this body. `dynamic`, because this is an
+        // occurrence, not a proven drop — the value may be moved out and
+        // dropped somewhere else entirely, and proving which would need the
+        // move/liveness analysis this walker deliberately does not do.
+        //
+        // WHY THIS IS OBSERVABLE AT ALL, contrary to the earlier reading that
+        // it could only be caught by liveness analysis: rustc's `dead_code`
+        // lint never names a trait-impl method, so it says nothing about
+        // `drop` itself either way. What it DOES report is `drop`'s
+        // transitive callee — measured on a probe crate, `function
+        // cleanup_never is never used` for a `Drop` impl on a
+        // never-constructed type, while the corresponding callee of a
+        // constructed type's `drop` is NOT reported. So the divergence lands
+        // one hop past `drop`, which is exactly what `testdata/drop_glue`
+        // pins.
+        //
+        // TRANSITIVE, not just the occurring type's own impl: dropping an
+        // `Outer` also drops everything it owns, so `drop_glue` maps each ADT
+        // to every `Drop::drop` its destructor can reach. Measured as a real
+        // false-dead-code source, not a hypothetical — a `#[derive(Default)]
+        // struct Outer { inner: Inner }` where `Inner: Drop` puts `Inner` in
+        // NO expression anywhere, yet `inner_cleanup` genuinely runs, and
+        // rustc agrees it is live while a non-transitive lookup calls it
+        // dead. See `drop_glue_map`.
+        if !ctx.drop_glue.is_empty() {
+            if let Some(expr) = ast::Expr::cast(n.clone()) {
+                if let Some(adt) =
+                    sema.type_of_expr(&expr).map(|i| i.original).and_then(|t| t.as_adt())
+                {
+                    for drop_fn in ctx.drop_glue.get(&adt).into_iter().flatten() {
+                        out.push(site(sema, &n, *drop_fn, true, db, vfs, root));
+                    }
+                }
             }
         }
         // `println!("{}", w)` / `{:?}` -> `Display::fmt` / `Debug::fmt`. This
@@ -462,6 +574,194 @@ fn push_trait_method_edges<'db>(
 /// the accidental, import-position-dependent root marking the plan's trap
 /// note warns about. `testdata/desugar` deliberately has no `use` statement
 /// anywhere for this reason; this lookup must not depend on one either.
+/// The enclosing function's declared error type — `E` in `-> Result<_, E>` —
+/// which is the target type of the implicit `From::from` conversion `?`
+/// performs (see `walk`'s `TryExpr` arm).
+///
+/// Gated on the return type actually being `core::result::Result`, resolved
+/// through the crate graph rather than matched on the name `Result`: a
+/// workspace type of its own called `Result` (or an alias to one) would
+/// otherwise have its second type argument treated as an error type. The
+/// other stable `Try` implementors need no handling — `Option<T>` has one
+/// type argument so `nth(1)` is `None`, and `?` on an `Option` performs no
+/// conversion at all.
+fn try_error_type<'db>(
+    db: &'db RootDatabase,
+    f: ra_ap_hir::Function,
+) -> Option<ra_ap_hir::Type<'db>> {
+    // `ret_type(self, db: &dyn HirDatabase) -> Type<'_>` elides the return
+    // lifetime to the `db` REFERENCE's, and coercing `&'db RootDatabase` to
+    // `&dyn HirDatabase` at the call site creates a temporary reborrow — so
+    // the naive `f.ret_type(db)` yields a `Type` that cannot outlive this
+    // function. Naming the coercion pins it to `'db`.
+    let db_dyn: &'db dyn ra_ap_hir::db::HirDatabase = db;
+    let ret = f.ret_type(db_dyn);
+    if ret.as_adt() != Some(core_result_enum(db)?) {
+        return None;
+    }
+    // `Item = Type<'db>` is independent of the `&self` borrow of `ret`, so
+    // the extracted error type outlives it — but the ITERATOR borrows `ret`,
+    // and as a tail expression its temporary would be dropped after `ret`.
+    // Binding forces the iterator dead first.
+    let err_ty = ret.type_arguments().nth(1);
+    err_ty
+}
+
+/// For each workspace-local ADT, every workspace-local `Drop::drop` that
+/// dropping a value of that type can reach — its own impl if it has one, plus
+/// those of every type it transitively OWNS. This is Rust's drop glue, and
+/// modelling only the direct impl is not enough: measured on a probe crate,
+/// a `#[derive(Default)] struct Outer { inner: Inner }` with `impl Drop for
+/// Inner` puts `Inner` in no expression anywhere in the program, yet
+/// `Inner::drop` genuinely runs when an `Outer` goes out of scope — rustc
+/// reports its callee live, and a direct-only lookup reports it dead. A real
+/// false-dead-code source, closed here rather than recorded as residue.
+///
+/// Empty when the workspace has no `Drop` impl at all, which is the common
+/// case and the one that matters for cost: `walk` checks emptiness before
+/// doing any per-expression `type_of_expr` work, so crates without a
+/// destructor pay nothing for this arm.
+///
+/// Cycles (`struct A { b: Option<Box<B>> }`, `struct B { a: Option<Box<A>> }`)
+/// terminate on the `seen` set rather than recursing forever.
+fn drop_glue_map(db: &RootDatabase) -> HashMap<Adt, Vec<ra_ap_hir::Function>> {
+    let direct: HashMap<Adt, ra_ap_hir::Function> = local_drop_impls(db).into_iter().collect();
+    if direct.is_empty() {
+        return HashMap::new();
+    }
+
+    let adts = local_adts(db);
+    let owns: HashMap<Adt, Vec<Adt>> =
+        adts.iter().map(|&a| (a, owned_adts(db, a))).collect();
+
+    let mut map: HashMap<Adt, Vec<ra_ap_hir::Function>> = HashMap::new();
+    for &start in &adts {
+        let mut seen: std::collections::HashSet<Adt> = std::collections::HashSet::new();
+        let mut stack = vec![start];
+        let mut fns = Vec::new();
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            if let Some(&f) = direct.get(&cur) {
+                fns.push(f);
+            }
+            if let Some(children) = owns.get(&cur) {
+                stack.extend(children.iter().copied());
+            }
+        }
+        if !fns.is_empty() {
+            map.insert(start, fns);
+        }
+    }
+    map
+}
+
+/// Every ADT declared in a workspace-member crate — the universe
+/// `drop_glue_map` computes glue for. Same crate/module traversal
+/// `enumerate::collect` uses for functions, and the `CrateOrigin::Local`
+/// filter matters for the same reason: without it this pulls in the whole
+/// dependency closure plus std.
+fn local_adts(db: &RootDatabase) -> Vec<Adt> {
+    let mut out = Vec::new();
+    for krate in Crate::all(db) {
+        if !matches!(krate.origin(db), CrateOrigin::Local { .. }) {
+            continue;
+        }
+        for module in krate.modules(db) {
+            for decl in module.declarations(db) {
+                if let ModuleDef::Adt(adt) = decl {
+                    out.push(adt);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The ADTs a value of `adt` owns directly, through its fields (every variant's
+/// fields, for an enum). Generic arguments are followed too, so a
+/// `Vec<Inner>`/`Option<Inner>` field yields `Inner` and not merely `Vec`:
+/// dropping the container drops the elements.
+fn owned_adts(db: &RootDatabase, adt: Adt) -> Vec<Adt> {
+    let db_dyn: &dyn ra_ap_hir::db::HirDatabase = db;
+    let fields = match adt {
+        Adt::Struct(s) => s.fields(db_dyn),
+        Adt::Union(u) => u.fields(db_dyn),
+        Adt::Enum(e) => e.variants(db_dyn).into_iter().flat_map(|v| v.fields(db_dyn)).collect(),
+    };
+    let mut out = Vec::new();
+    for field in fields {
+        collect_adts_in_type(&field.ty(db_dyn), &mut out, 0);
+    }
+    out
+}
+
+/// Every ADT mentioned by `ty`, following generic arguments so a nested
+/// `Vec<Option<Inner>>` yields `Inner`. `depth` bounds a pathologically nested
+/// type; the value only has to exceed real generic nesting, and it is not the
+/// cycle guard — `drop_glue_map`'s `seen` set is (a type can nest deeply
+/// without recursing, and can recurse without nesting deeply).
+fn collect_adts_in_type(ty: &ra_ap_hir::Type<'_>, out: &mut Vec<Adt>, depth: usize) {
+    const TYPE_ARG_DEPTH_LIMIT: usize = 16;
+    if depth > TYPE_ARG_DEPTH_LIMIT {
+        return;
+    }
+    if let Some(adt) = ty.as_adt() {
+        out.push(adt);
+    }
+    for arg in ty.type_arguments() {
+        collect_adts_in_type(&arg, out, depth + 1);
+    }
+}
+
+/// Every workspace-local `Drop` impl, as (the impl's self ADT, its `drop`).
+/// The direct-impl seed `drop_glue_map` expands transitively.
+///
+/// Restricted to `CrateOrigin::Local` because an edge to a non-local `drop`
+/// would be discarded by `edges`' `index` lookup anyway.
+fn local_drop_impls(db: &RootDatabase) -> Vec<(Adt, ra_ap_hir::Function)> {
+    let Some(drop_trait) = core_trait(db, &["ops"], "Drop") else { return Vec::new() };
+    let mut out = Vec::new();
+    for imp in Impl::all_for_trait(db, drop_trait) {
+        let Some(adt) = imp.self_ty(db).as_adt() else { continue };
+        if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+            continue;
+        }
+        for item in imp.items(db) {
+            if let AssocItem::Function(f) = item {
+                if f.name(db).as_str() == "drop" {
+                    out.push((adt, f));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `core::result::Result`'s own `Adt`, located by the same crate-graph walk
+/// `core_trait` uses and for the same reason — a name resolution against the
+/// workspace's own `use` statements would make this depend on where an
+/// unrelated import sits (see `core_trait`'s doc comment).
+fn core_result_enum(db: &RootDatabase) -> Option<Adt> {
+    let core = Crate::all(db)
+        .into_iter()
+        .find(|k| matches!(k.origin(db), CrateOrigin::Lang(LangCrateOrigin::Core)))?;
+    let module = core
+        .root_module(db)
+        .children(db)
+        .find(|m| m.name(db).is_some_and(|n| n.as_str() == "result"))?;
+    module.scope(db, None).into_iter().find_map(|(item_name, def)| {
+        if item_name.as_str() != "Result" {
+            return None;
+        }
+        match def {
+            ScopeDef::ModuleDef(ModuleDef::Adt(adt @ Adt::Enum(_))) => Some(adt),
+            _ => None,
+        }
+    })
+}
+
 fn core_trait(db: &RootDatabase, path: &[&str], name: &str) -> Option<Trait> {
     let core = Crate::all(db)
         .into_iter()

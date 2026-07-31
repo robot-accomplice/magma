@@ -1,0 +1,21 @@
+{
+  "adjudication": "clean — family B's `?` conversion gap CLOSED, no adjudicated FATALs",
+  "note": "Regression guard for the second half of `?`'s desugaring: the implicit `From::from` error conversion performed through `FromResidual` when the propagated error type differs from the enclosing function's. `walk.rs` already resolved the first half (`Try::branch`, via `Semantics::resolve_try_expr`), but the conversion is a hidden argument to a synthesized `FromResidual::from_residual` with no expression node of its own, so no `Semantics::resolve_*` at the pinned `ra_ap_* = 0.0.343` can reach it.\n\nVERIFIED RED BEFORE THE FIX. This fixture was built first and confirmed to produce exactly 1 FATAL in BOTH configs -- `try_from::<HighErr as From>::from  (src/main.rs:25, id=3)` -- because `<HighErr as From<LowErr>>::from` is reachable only through the `?` in `mid`, and rustc reports no `dead_code` for it. A fixture that does not go red is a decoration, not coverage.\n\nHOW IT WAS CLOSED, AND WHY THIS IS NOT AN EXCLUSION. `walk.rs` now resolves the conversion type-directedly rather than syntactically, the same way format args resolves `Display`/`Debug`: `edges()` computes the enclosing function's declared error type once (`try_error_type`, gated on the return type actually being `core::result::Result` resolved through the crate graph, never name-matched) and threads it into `walk`, whose `TryExpr` arm emits an edge to every `impl From<_> for E2`. Excluded count is 0 and total considered is unchanged at 4 -- the FATAL went away because a real edge was found, not because anything stopped being measured.\n\nDELIBERATE OVER-APPROXIMATION. Edges are emitted for every `From` impl targeting the error type, not only the one inference actually selected for this `?`. Narrowing that would require identifying which `FromResidual` impl was chosen, which is the exact thing with no exposed API here. Over-approximating fails toward live, which is the safe direction; under-approximating is the false-dead-code defect this fixture exists to prevent. The edge is `dynamic` for the same reason.\n\nSTILL OPEN in family B: `Drop::drop`. No expression node exists for scope exit at all, so catching it needs move/liveness analysis this walker does not perform. It remains a false-dead-code source and is NOT covered by this fixture.\n\nNo `use` statements anywhere, including the crate root -- see the source file's own comment for why a `use core::convert::From;` would mask the family via roots.rs's re-export-bridge scan.",
+  "fatal": [],
+  "summary": {
+    "considered": 4,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 4,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 4,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 4,
+    "fatal": 0
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "adjudication": "clean — family B's `Drop::drop` gap CLOSED, direct and transitive, no adjudicated FATALs",
+  "note": "Regression guard for the last of family B's six desugaring forms: `Drop::drop` at scope exit. Unlike every other form, this one has NO expression node at all -- a value going out of scope is not written down anywhere -- so there is nothing for `walk.rs` to cast to an `ast::` shape and nothing for any `Semantics::resolve_*` to key off.\n\nVERIFIED RED BEFORE THE FIX, by parking the fix and rebuilding rather than by inference: 4 FATALs in BOTH configs, covering both shapes this fixture carries -- `cleanup (src/main.rs:33)` and `<Guard as Drop>::drop (src/main.rs:28)` for the direct case, `inner_cleanup (src/main.rs:51)` and `<Inner as Drop>::drop (src/main.rs:46)` for the transitive one -- with considered 5, excluded 2.\n\nCORRECTION TO THE EARLIER READING. This family was previously recorded as catchable only by move/liveness analysis, on the basis that no FATAL could be produced for it. That is wrong, and the reason is worth keeping: rustc's `dead_code` lint never reports a trait-impl method, so it says nothing about `drop` in either direction. What it DOES report is `drop`'s transitive callee. Measured on a probe crate carrying both a constructed and a never-constructed `Drop` type, rustc emitted `struct NeverConstructed is never constructed` and `function cleanup_never is never used`, and stayed silent about both `drop`s. So the divergence is observable one hop PAST `drop` -- which is what `cleanup`/`inner_cleanup` above pin -- and no liveness analysis is needed to see it.\n\nHOW IT WAS CLOSED, AND WHY THIS IS NOT AN EXCLUSION. `walk.rs` resolves the drop from the TYPES occurring in the body rather than from a (non-existent) syntax node: a value of type `T` appearing here means `<T as Drop>::drop` may run when it leaves scope, so an edge is emitted. Excluded stays at 2 and considered at 5 across the fix: the FATALs went away because four real edges were found (`main -> <Guard as Drop>::drop -> cleanup` and `main -> <Inner as Drop>::drop -> inner_cleanup`), not because anything stopped being measured. The 2 exclusions are the two DERIVED `Default::default` methods, `generated: true` via the Family F relocation -- unrelated to this family.\n\nTRANSITIVITY IS THE LOAD-BEARING HALF. Drop glue is transitive: dropping an `Outer` drops everything it owns. `Inner` is deliberately written in NO expression anywhere in this program -- it exists only through `Outer`'s derived `Default` calling `Inner`'s derived `Default` -- so a fix mapping only an occurring type to its OWN `Drop` impl leaves `inner_cleanup` reported dead while it genuinely runs. That was measured on a probe before being folded in here, not hypothesised. `walk.rs` therefore consults `drop_glue_map`, which expands each ADT through its owned field types (following generic arguments, so a `Vec<Inner>` field yields `Inner`) with a `seen` set for cyclic types. BOTH `#[derive(Default)]` attributes are load-bearing: writing either `Default` by hand would put an `Inner` expression in the source and silently reduce this to the direct case.\n\nDELIBERATE OVER-APPROXIMATION. Edges are `dynamic`: an occurrence is not a proven drop, since the value may be moved out and dropped elsewhere. Over-approximating fails toward live, the safe direction.\n\nDELIBERATELY OMITS a never-constructed `Drop` type. That shape yields a FATAL no edge fix can close, because rustc's silence about trait-impl methods makes a genuinely-dead one read `live` to this harness. It is a general property of trait impls rather than anything specific to `Drop`, so including it would make this fixture permanently red for a reason unrelated to its own family.\n\nNo `use` statements anywhere, including the crate root -- same reason as `testdata/desugar` and `testdata/try_from`.",
+  "fatal": [],
+  "summary": {
+    "considered": 5,
+    "excluded": 2,
+    "agree_dead": 0,
+    "agree_live": 5,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 5,
+    "excluded": 2,
+    "agree_dead": 0,
+    "agree_live": 5,
+    "fatal": 0
+  }
+}
