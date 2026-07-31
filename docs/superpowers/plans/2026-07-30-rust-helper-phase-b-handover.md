@@ -640,3 +640,77 @@ the arm to the expression forms that actually PRODUCE values (`CallExpr`, `Metho
    currently NOT clean across `roots.rs`/`walk.rs`/`main.rs`/`enumerate.rs` (pre-existing).
 4. **A real Rust emit should go to Architext for validation before release** — that process is
    three-for-three at catching defects pre-ship.
+
+---
+
+# Real-workspace validation on `roboticus-rust` — measured, 2026-07-31
+
+First full run of the wired pipeline against a real workspace. **It did not refuse** — see the
+correction below.
+
+```
+TIMING prod-config (cfg(test) off): 769.8s
+TIMING test-config (cfg(test) on):  918.7s
+TIMING merge: 0.2s for 10921 functions, 24611 calls
+TIMING TOTAL: 1688.8s          (real 1689.45  user 1298.74  sys 62.06)
+```
+
+10,921 functions, 24,611 calls, an 11 MB JSON envelope, exit 0.
+
+## Correction: `roboticus-rust` no longer refuses
+
+An earlier section records "a pre-existing target-dir anchoring gap for excluded nested
+sub-projects (a `cargo-fuzz` crate) causes a refusal on `roboticus-rust`." **That is now stale** —
+this run produced a complete graph. Do not plan around a refusal there. Whether the gap was fixed
+incidentally or the original diagnosis was wrong is NOT established, so treat the refusal claim as
+withdrawn rather than as resolved.
+
+## Family F validated at scale
+
+Across 10,921 nodes and 24,611 call sites: **zero** absolute `file` paths, **zero** absolute
+`site_file` paths, **zero** paths mentioning `rustup`/`.cargo`. `main::non_local_paths` did not
+fire, which is the correct outcome rather than a silent one — it would have refused the whole run.
+2,095 nodes `generated: true` (~19%, consistent with derives being relocated and correctly
+flagged), 274 `kind:"init"` nodes (family C), 3 `macro_truncated` (family D's disclosure firing on
+real code).
+
+## Why `test_entry` was genuinely blocking — quantified on this data
+
+**5,574 of 10,921 functions (51%) carry `test: true`.** Reachability computed offline from this
+exact graph, both ways a consumer could have seeded it before `test_entry` existed:
+
+| all-roots seed | seeds | reachable | UNREACHABLE (= reported dead) |
+|---|---|---|---|
+| `root` only | 3,707 | 5,042 | **5,879** |
+| `root \|\| test \|\| bench` | 9,281 | 10,723 | **198** |
+
+The two wrong answers differ by **5,681 nodes** — a ~29× difference in the dead-code count. And
+**294 of those nodes reach nothing at all**: they are live only because the broad seed made them
+their own roots. Those are precisely the genuinely-dead test helpers that could never have been
+reported. The correct seed (`root` for prod, `root || test_entry || bench` for all-roots) sits
+between the two, and neither wrong option is a conservative approximation of it.
+
+## Runtime — what is now known, and what still is not
+
+**Known:** 1688.8s (28.1 min) end to end, on a run that was contended for part of its life. Nearly
+all of it is the two workspace loads (769.8 + 918.7 = 1688.5s); the merge is 0.2s and is not worth
+optimising.
+
+**Still not known: how much of that the family B drop arm costs.** The per-config TIMING covers
+load AND walk together, so the walk cannot be separated from the load in this data, and there is no
+matched before/after. Do NOT read 1688.8s as a regression — the handover already records the
+identical config measured at 176.7s and >633s on repeat (>3.6× spread under load).
+
+**What to do about it, in order:**
+1. **Instrument first.** Split the per-config TIMING into load vs walk so the question is
+   answerable from one run instead of two. Cheap, and it makes every future measurement cheaper.
+2. Then, on a quiet machine, three runs each with and without the drop arm (a one-line early return
+   in `drop_glue_map` isolates it exactly). Three, not one — this project has been burned twice by
+   presenting a single sample as a number.
+3. Only if it proves costly: restrict the arm to value-producing expression forms (`CallExpr`,
+   `MethodCallExpr`, `RecordExpr`, `PathExpr`) rather than every expression node. Deliberately not
+   applied blind.
+
+**Separately worth deciding:** 28 minutes is a real UX fact for a magma run on a large Rust repo,
+independent of any regression. Live progress now reports through (commit `887effc`), so it no
+longer LOOKS hung, but the wall-clock cost should be stated in the README before release.
