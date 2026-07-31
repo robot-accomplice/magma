@@ -827,3 +827,86 @@ fn pos_of(db: &RootDatabase, f: ra_ap_hir::Function) -> Option<FilePosition> {
     let file_id = src.file_id.file_id()?.file_id(db);
     Some(FilePosition { file_id, offset })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(file: &str) -> model::Function {
+        model::Function {
+            id: 0,
+            symbol: "s".into(),
+            pkg: "p".into(),
+            file: file.into(),
+            line: 1,
+            column: 1,
+            kind: "func".into(),
+            exported: false,
+            test: false,
+            test_entry: false,
+            root: false,
+            bench: false,
+            generated: false,
+            macro_truncated: false,
+            signature: model::Signature {
+                params: vec![],
+                results: vec![],
+            },
+            doc: None,
+            trait_impl: None,
+        }
+    }
+
+    fn call(site: &str) -> model::Call {
+        model::Call {
+            from: 0,
+            to: 0,
+            site_file: site.into(),
+            site_line: 1,
+            kind: "static".into(),
+        }
+    }
+
+    /// Family F's last line of defence had no test at all: `relocate_out_of_root`
+    /// repairs every shape currently known, so the refusal never fires on any
+    /// fixture, and a regression that broke the check would have been silent —
+    /// which is precisely the failure mode the check exists to prevent. Driven
+    /// directly here instead.
+    #[test]
+    fn non_local_paths_flags_escaped_locations_only() {
+        // Repo-relative paths are what a healthy run emits.
+        assert!(non_local_paths(&[node("src/lib.rs")], &[call("src/lib.rs")]).is_empty());
+
+        // An absolute path is EXACTLY the `repo_relative_path` fallback for a
+        // location outside the workspace — the state family F repairs.
+        let escaped = non_local_paths(
+            &[node(
+                "/Users/someone/.rustup/toolchains/x/lib/core/src/fmt/mod.rs",
+            )],
+            &[],
+        );
+        assert_eq!(escaped.len(), 1, "an out-of-root node must be reported");
+        assert!(
+            escaped[0].contains(".rustup"),
+            "the offending path must be named: {escaped:?}"
+        );
+
+        // Call sites go through the same `repo_relative_path`, so they escape
+        // the same way and must be caught the same way.
+        assert_eq!(
+            non_local_paths(&[], &[call("/elsewhere/x.rs")]).len(),
+            1,
+            "an out-of-root call site must be reported too"
+        );
+
+        // Both sides at once, de-duplicated and sorted for a stable message.
+        let both = non_local_paths(&[node("/a/x.rs")], &[call("/b/y.rs")]);
+        assert_eq!(both.len(), 2);
+        let mut sorted = both.clone();
+        sorted.sort();
+        assert_eq!(
+            both, sorted,
+            "output must be sorted for a deterministic refusal reason"
+        );
+    }
+}
