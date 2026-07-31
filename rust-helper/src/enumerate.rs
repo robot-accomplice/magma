@@ -580,7 +580,30 @@ fn push(
         }
     };
 
-    let file = repo_relative_path(vfs, root, file_id);
+    // Family F: a `CrateOrigin::Local` crate does not guarantee its items
+    // resolve to files inside the workspace. Every builtin `derive` breaks
+    // that assumption — `<LocalType as Debug>::fmt` resolves to `Debug`'s own
+    // method declaration in the sysroot (see `is_under_root`) — which leaked
+    // an absolute, username-bearing path into the contract AND, because that
+    // location is a per-trait CONSTANT shared by every deriving type in the
+    // workspace, collided in `main::node_key`: two crates each deriving
+    // `Debug` for a `Widget` produced one surviving node and an edge from one
+    // crate's caller into the OTHER crate's method. Relocating onto local
+    // source repairs the path, the `generated` flag, and the collision
+    // together, because the replacement location is per-type rather than
+    // per-trait.
+    //
+    // `relocate_out_of_root` returning `None` leaves the original location in
+    // place rather than dropping the node — a drop would be a silent
+    // exclusion. `assert_nodes_local` (main.rs) is what stops such a residual
+    // from reaching a consumer unnoticed.
+    let (file, line, column, relocated) = match is_under_root(vfs, root, file_id) {
+        true => (repo_relative_path(vfs, root, file_id), line + 1, column + 1, false),
+        false => match relocate_out_of_root(db, sema, vfs, root, f) {
+            Some(loc) => (loc.file, loc.line, loc.column, true),
+            None => (repo_relative_path(vfs, root, file_id), line + 1, column + 1, false),
+        },
+    };
 
     let display_target = DisplayTarget::from_crate(db, f.module(db).krate(db).into());
     let params: Vec<model::Param> = f
@@ -611,8 +634,11 @@ fn push(
             symbol: qualified_symbol(db, f, display_target),
             pkg: module_path(db, f),
             file,
-            line: line + 1, // line_index is 0-based; magma reports 1-based
-            column: column + 1, // same: line_index col is 0-based, rustc's is 1-based
+            // Already 1-based: both arms of the Family F match above convert
+            // from `line_index`'s 0-based line/column, and `model::Loc`
+            // (the relocated arm) is 1-based by construction.
+            line,
+            column,
             kind: if f.self_param(db).is_some() { "method" } else { "func" }.to_owned(),
             exported: f.visibility(db) == Visibility::Public,
             test,
@@ -642,7 +668,20 @@ fn push(
             // user-authored counterpart to point at (a derive-synthesized
             // method body, for instance) — see its doc comment for exactly
             // which kinds are excluded and why each one is safe to exclude.
-            generated: is_macro_kind_synthetic(db, src.file_id)
+            //
+            // Family F adds `relocated`: a node that had to be moved back
+            // onto local source had no hand-written `fn` of its own to point
+            // at (a derive synthesizes the whole method, name token
+            // included), which is precisely what `generated` means.
+            // `is_macro_kind_synthetic` cannot see these — RA reports the
+            // sysroot trait declaration as an ordinary file, so `macro_file()`
+            // is `None` and the macro-kind path never fires at all. The
+            // `target_dir` test below still keys on the ORIGINAL `file_id`
+            // rather than the relocated one; that is intentional and inert,
+            // since `relocated` has already forced the field true in every
+            // case where the two differ.
+            generated: relocated
+                || is_macro_kind_synthetic(db, src.file_id)
                 || vfs
                     .file_path(file_id)
                     .as_path()
@@ -733,6 +772,25 @@ fn decl_loc<N: AstNode + HasName>(
     root: &AbsPath,
     src: InFile<N>,
 ) -> Option<model::Loc> {
+    decl_loc_with_file(db, sema, vfs, root, src).map(|(_, loc)| loc)
+}
+
+/// `decl_loc` plus the resolved `FileId` it derived the location from.
+/// Split out for Family F: relocating an out-of-root node (see
+/// `relocate_out_of_root`) must confirm the *replacement* location is itself
+/// inside the workspace, and the repo-relative string `decl_loc` returns
+/// cannot answer that — an out-of-root path falls back to an absolute string
+/// (see `repo_relative_path`), which is exactly the state being repaired.
+/// Testing the `FileId` against the vfs is the same check `is_under_root`
+/// applies to the original location, so both sides of the swap are judged by
+/// one predicate rather than by string shape.
+fn decl_loc_with_file<N: AstNode + HasName>(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    src: InFile<N>,
+) -> Option<(FileId, model::Loc)> {
     let name_node = src.value.name()?;
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
@@ -749,11 +807,115 @@ fn decl_loc<N: AstNode + HasName>(
             (file_id, line, column)
         }
     };
-    Some(model::Loc {
-        file: repo_relative_path(vfs, root, file_id),
-        line: line + 1,
-        column: column + 1,
-    })
+    Some((
+        file_id,
+        model::Loc {
+            file: repo_relative_path(vfs, root, file_id),
+            line: line + 1,
+            column: column + 1,
+        },
+    ))
+}
+
+/// True when `file_id` is a real file underneath the workspace root — the
+/// invariant every emitted node's own `file` must satisfy (Family F).
+///
+/// A `CrateOrigin::Local` crate is *supposed* to guarantee this, and for
+/// hand-written code it does. It does not for a builtin `derive`: RA resolves
+/// `<LocalType as Debug>::fmt`'s `source(db)` to the *trait's own method
+/// declaration* in the sysroot (`core/src/fmt/mod.rs:1084` is literally
+/// `fn fmt(&self, f: &mut Formatter<'_>) -> Result;`), with `macro_file()`
+/// returning `None` — so nothing in the macro-kind path even sees it as an
+/// expansion. See `relocate_out_of_root` for the repair.
+fn is_under_root(vfs: &Vfs, root: &AbsPath, file_id: FileId) -> bool {
+    vfs.file_path(file_id).as_path().is_some_and(|p| p.starts_with(root))
+}
+
+/// Family F repair: a workspace-local function whose own declaration resolves
+/// OUTSIDE the workspace root is relocated onto the local source that caused
+/// it to exist, and reported `generated: true`.
+///
+/// Only builtin `derive`s have been observed producing this state, and for
+/// them the honest location is the type declaration carrying the `#[derive]`
+/// — that is the line a human edits to remove the impl. Both candidates are
+/// tried in specificity order, and each is accepted ONLY if it lands inside
+/// the workspace, so the repair can never trade one out-of-root path for
+/// another:
+///
+/// 1. **The `impl` block.** Correct for any hand-written impl whose method
+///    somehow resolves out of root, and the more general answer — it exists
+///    for `impl Tr for &T` and other shapes where `as_adt()` is `None`.
+/// 2. **The self type's own declaration.** The derive case: a derived impl
+///    block is synthesized, so (1) is expected to fail or resolve back into
+///    the sysroot, while the `Adt` is the user's own `struct`/`enum`.
+///
+/// Returning `None` means the node is genuinely unexplainable — see the
+/// caller for what happens then. Deliberately NOT a silent drop: dropping is
+/// an exclusion, and this harness's standing rule is that a divergence gets
+/// disclosed, never excluded.
+fn relocate_out_of_root(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    f: ra_ap_hir::Function,
+) -> Option<model::Loc> {
+    let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else { return None };
+
+    let in_root = |cand: Option<(FileId, model::Loc)>| {
+        cand.filter(|(fid, _)| is_under_root(vfs, root, *fid)).map(|(_, loc)| loc)
+    };
+
+    // (1) the impl block. `ast::Impl` has no name token, so `decl_loc_with_file`
+    // (which keys on `HasName`) does not apply; the impl keyword's own span is
+    // the analogous anchor.
+    let impl_loc = imp.source(db).and_then(|src| {
+        let (file_id, line, column) = src_loc(db, sema, src.file_id, src.value.syntax())?;
+        Some((
+            file_id,
+            model::Loc {
+                file: repo_relative_path(vfs, root, file_id),
+                line: line + 1,
+                column: column + 1,
+            },
+        ))
+    });
+    if let Some(loc) = in_root(impl_loc) {
+        return Some(loc);
+    }
+
+    // (2) the self type's declaration — the derive case.
+    let adt = imp.self_ty(db).as_adt()?;
+    if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+        return None;
+    }
+    in_root(adt.source(db).and_then(|src| decl_loc_with_file(db, sema, vfs, root, src)))
+}
+
+/// The real-file/macro-expansion location handling `push` and
+/// `decl_loc_with_file` both apply, over a bare syntax node rather than a
+/// named item — needed by `relocate_out_of_root`'s impl-block candidate,
+/// since `ast::Impl` carries no name token to key on.
+fn src_loc(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    file_id: HirFileId,
+    node: &ra_ap_syntax::SyntaxNode,
+) -> Option<(FileId, u32, u32)> {
+    match file_id.file_id() {
+        Some(efid) => {
+            let fid = efid.file_id(db);
+            let (line, column) = char_line_col(db, fid, node.text_range().start());
+            Some((fid, line, column))
+        }
+        None => {
+            sema.parse_or_expand(file_id);
+            let range = sema.original_range(node);
+            let fid = range.file_id.file_id(db);
+            let (line, column) = char_line_col(db, fid, range.range.start());
+            Some((fid, line, column))
+        }
+    }
 }
 
 /// Repo-relative path for `file_id`, computed the same way for node metadata

@@ -163,9 +163,69 @@ fn main() -> anyhow::Result<()> {
     );
     eprintln!("TIMING TOTAL: {:.1}s", t0.elapsed().as_secs_f64());
 
+    // Family F: last line of defence before anything reaches a consumer.
+    let escaped = non_local_paths(&merged.functions, &merged.calls);
+    if !escaped.is_empty() {
+        let r = model::Refusal::new(
+            executed_target_code,
+            format!(
+                "{} node(s)/call site(s) resolve outside the workspace root; \
+                 reachability not computable: {}",
+                escaped.len(),
+                escaped.join(", ")
+            ),
+        );
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        std::process::exit(0);
+    }
+
     let out = model::Output::new(executed_target_code, merged.functions, merged.calls);
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
+}
+
+/// Every emitted `file`/`site_file` that names a location OUTSIDE the
+/// workspace root — the Family F invariant, checked directly rather than via
+/// a reachability fixture.
+///
+/// **Why this cannot be an oracle fixture.** The defect's original instance
+/// (`#[derive(Debug)]` resolving into the sysroot) is invisible to the whole
+/// harness by construction: rust-analyzer marks the derived method `root:true`
+/// regardless of visibility, so the helper and rustc can never *disagree*
+/// about its reachability and no `oracle-diff` comparison will ever go red on
+/// it. `testdata/toolchain_derive` documents the shape; it is not coverage.
+/// A direct assertion is the only check that can see this class at all.
+///
+/// **How the test works.** `enumerate::repo_relative_path` (which both node
+/// metadata and `walk.rs`'s call-site metadata go through) strips the
+/// workspace root and returns the untouched ABSOLUTE path when the strip
+/// fails. So "the emitted string is absolute" is exactly, and only, "this
+/// location escaped the workspace" — `is_absolute()` tests the fallback
+/// branch itself, not a guess about path shape.
+///
+/// A hit is a refusal, not a filtered-out row, for the reason the rest of
+/// this harness refuses: an unexplainable location means the map is degraded,
+/// and magma's contract is an honest map or an honest refusal — never a quiet
+/// partial one. Dropping the offending rows instead would be an exclusion,
+/// and four exclusions in this harness have already been found unsound.
+/// `enumerate::relocate_out_of_root` repairs the one shape that is understood
+/// (builtin derives), so reaching here means a genuinely new shape that has
+/// not been characterised — precisely when silence is most expensive.
+fn non_local_paths(functions: &[model::Function], calls: &[model::Call]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in functions {
+        if Path::new(&f.file).is_absolute() {
+            out.push(format!("{} @ {}:{}", f.symbol, f.file, f.line));
+        }
+    }
+    for c in calls {
+        if Path::new(&c.site_file).is_absolute() {
+            out.push(format!("call site {}:{}", c.site_file, c.site_line));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Nodes + edges from one full analysis pass, in that pass's OWN local id
@@ -317,13 +377,30 @@ fn analyze_one_config(
 /// `model::Function::column` — and does not move when only `cfg(test)`
 /// changes; `symbol` is included because `enumerate::qualify_stem` already
 /// makes it unique within a module for exactly this kind of identity
-/// comparison (two distinct methods never share (file, line, column) at all,
-/// so `symbol` is redundant in practice, but costs nothing and removes any
-/// doubt).
-type NodeKey = (String, u32, u32, String);
+/// comparison.
+///
+/// **`pkg` is load-bearing, not belt-and-braces.** The original key omitted
+/// it on the reasoning that two distinct methods never share (file, line,
+/// column) — true for hand-written code, and false for a builtin `derive`,
+/// whose declaration resolves to the *trait's* method in the sysroot (see
+/// `enumerate::is_under_root`). That location is a per-trait CONSTANT, so two
+/// workspace crates each deriving `Debug` for a type named `Widget` produced
+/// byte-identical keys: one node was silently dropped by the merge below, and
+/// `remap_and_aggregate` rewrote the survivor's id over both, fabricating an
+/// edge from one crate's caller into the other crate's method. Reproduced on
+/// a two-crate probe before the fix.
+///
+/// `enumerate`'s Family F relocation now moves those nodes onto per-type
+/// local source, which dissolves the collision at its source; `pkg` stays in
+/// the key regardless, so the merge cannot silently lose a node again if some
+/// future shape reintroduces a shared location. Two members of one workspace
+/// always differ in `pkg` (it is rooted at the crate's display name), and
+/// `pkg` never varies with `cfg(test)`, so adding it cannot split a node that
+/// should have merged.
+type NodeKey = (String, String, u32, u32, String);
 
 fn node_key(f: &model::Function) -> NodeKey {
-    (f.file.clone(), f.line, f.column, f.symbol.clone())
+    (f.pkg.clone(), f.file.clone(), f.line, f.column, f.symbol.clone())
 }
 
 /// Merges two full analysis passes — cfg(test) off (`prod`) and cfg(test) on
