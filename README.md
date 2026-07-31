@@ -46,8 +46,19 @@ git clone https://github.com/robot-accomplice/magma && cd magma
 just install      # or: go install .
 ```
 
-The only runtime requirement is a working `go` toolchain (magma analyzes Go by building a
-type-precise call graph in-process — no third-party analyzer binaries to install).
+Analyzing **Go** needs only a working `go` toolchain — magma builds a type-precise call graph
+in-process, with no third-party analyzer binaries to install.
+
+Analyzing **Rust** additionally needs the `magma-rust-helper` binary, which links rust-analyzer as
+a library and so cannot ship through `go install`:
+
+```bash
+cargo install --path rust-helper   # from a magma checkout
+```
+
+magma finds it on `PATH`, or at `$MAGMA_RUST_HELPER`. Without it, a Rust repo is **refused** with
+an install hint rather than analyzed partially — magma returns an honest map or an honest refusal,
+never a degraded one.
 
 ## Usage
 
@@ -137,8 +148,10 @@ pin downstream artifacts to the `sha` it stamps.
 magma exits non-zero and writes a refused (but present) set of files when it cannot stand
 behind a map:
 
-- **Non-Go / unknown language.** v0.1.0 supports Go only; other languages are detected and
+- **Unsupported / unknown language.** Go and Rust are supported; other languages are detected and
   refused. Support lands one language per minor release.
+- **Rust helper not installed.** A Rust repo is refused, with the install command, when
+  `magma-rust-helper` is on neither `PATH` nor `$MAGMA_RUST_HELPER`.
 - **No production `main` in scope.** A library or a single-package scope has no external-caller
   root, so reachability would be almost all false positives. `graph.json` is still emitted
   (test-rooted); `_dead` and `_test-only` refuse.
