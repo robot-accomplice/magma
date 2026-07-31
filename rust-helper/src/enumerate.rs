@@ -127,7 +127,16 @@ pub fn collect_inits(
                     ModuleDef::Trait(tr) => {
                         for item in tr.items(db) {
                             if let AssocItem::Const(c) = item {
-                                push_const(db, sema, vfs, root, target_dir, c, &mut next_id, &mut out);
+                                push_const(
+                                    db,
+                                    sema,
+                                    vfs,
+                                    root,
+                                    target_dir,
+                                    c,
+                                    &mut next_id,
+                                    &mut out,
+                                );
                             }
                         }
                     }
@@ -162,7 +171,10 @@ fn is_init_cfg_test<T: HasAttrs + Copy>(
 ) -> bool {
     in_test_or_bench_target(file)
         || item.attrs(db).cfgs(db).is_some_and(cfg_requires_test)
-        || module.path_to_root(db).into_iter().any(|m| m.attrs(db).cfgs(db).is_some_and(cfg_requires_test))
+        || module
+            .path_to_root(db)
+            .into_iter()
+            .any(|m| m.attrs(db).cfgs(db).is_some_and(cfg_requires_test))
 }
 
 /// Builds a synthesized `model::Function` node for `c`'s initializer, if it
@@ -192,7 +204,9 @@ fn push_const(
     let Some(name) = c.name(db) else { return };
     let name = name.as_str().to_owned();
     let Some(src) = c.source(db) else { return };
-    let Some(name_node) = src.value.name() else { return };
+    let Some(name_node) = src.value.name() else {
+        return;
+    };
 
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
@@ -215,7 +229,11 @@ fn push_const(
     let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
     let test = is_init_cfg_test(db, c, module, &file);
     let ret_str = c.ty(db).display(db, display_target).to_string();
-    let results = if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
+    let results = if ret_str == "()" {
+        Vec::new()
+    } else {
+        vec![model::Result_ { ty: ret_str }]
+    };
 
     let id = *next_id;
     *next_id += 1;
@@ -252,7 +270,10 @@ fn push_const(
             // this true later, in place, only if its macro-depth guard fires
             // while walking THIS node's own initializer expression.
             macro_truncated: false,
-            signature: model::Signature { params: Vec::new(), results },
+            signature: model::Signature {
+                params: Vec::new(),
+                results,
+            },
             doc: c.hir_docs(db).map(|d| first_sentence(d.docs())),
             // Never an assoc item of a *trait impl* method -- `trait_impl`
             // exists only to key the oracle harness's method-cascade check.
@@ -285,7 +306,9 @@ fn push_static(
     }
     let name = s.name(db).as_str().to_owned();
     let Some(src) = s.source(db) else { return };
-    let Some(name_node) = src.value.name() else { return };
+    let Some(name_node) = src.value.name() else {
+        return;
+    };
 
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
@@ -308,7 +331,11 @@ fn push_static(
     let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
     let test = is_init_cfg_test(db, s, module, &file);
     let ret_str = s.ty(db).display(db, display_target).to_string();
-    let results = if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
+    let results = if ret_str == "()" {
+        Vec::new()
+    } else {
+        vec![model::Result_ { ty: ret_str }]
+    };
 
     let id = *next_id;
     *next_id += 1;
@@ -335,7 +362,10 @@ fn push_static(
                     .unwrap_or(false),
             // Family D: see push_const's identical comment on this field.
             macro_truncated: false,
-            signature: model::Signature { params: Vec::new(), results },
+            signature: model::Signature {
+                params: Vec::new(),
+                results,
+            },
             doc: s.hir_docs(db).map(|d| first_sentence(d.docs())),
             trait_impl: None,
         },
@@ -492,7 +522,11 @@ fn is_test_context(db: &RootDatabase, f: ra_ap_hir::Function, file: &str) -> boo
 ///     method name (`Display::fmt` and `Debug::fmt` on the same struct are
 ///     both `fmt`); the self-type-only form would silently reintroduce the
 ///     exact collision this fix exists to close.
-fn qualified_symbol(db: &RootDatabase, f: ra_ap_hir::Function, display_target: DisplayTarget) -> String {
+fn qualified_symbol(
+    db: &RootDatabase,
+    f: ra_ap_hir::Function,
+    display_target: DisplayTarget,
+) -> String {
     let name = f.name(db).as_str().to_owned();
     qualify_stem(db, &name, f.as_assoc_item(db), display_target)
 }
@@ -511,7 +545,9 @@ fn qualify_stem(
     assoc: Option<AssocItem>,
     display_target: DisplayTarget,
 ) -> String {
-    let Some(assoc) = assoc else { return name.to_owned() };
+    let Some(assoc) = assoc else {
+        return name.to_owned();
+    };
     match assoc.container(db) {
         AssocItemContainer::Trait(tr) => format!("{}::{name}", tr.name(db).as_str()),
         AssocItemContainer::Impl(imp) => {
@@ -554,7 +590,9 @@ fn push(
     out: &mut Vec<(model::Function, ra_ap_hir::Function)>,
 ) {
     let Some(src) = f.source(db) else { return };
-    let Some(name_node) = src.value.name() else { return };
+    let Some(name_node) = src.value.name() else {
+        return;
+    };
 
     // `src.file_id.file_id()` is None when the definition itself comes from
     // macro expansion — notably `include!(concat!(env!("OUT_DIR"), ...))`,
@@ -602,10 +640,20 @@ fn push(
     // exclusion. `assert_nodes_local` (main.rs) is what stops such a residual
     // from reaching a consumer unnoticed.
     let (file, line, column, relocated) = match is_under_root(vfs, root, file_id) {
-        true => (repo_relative_path(vfs, root, file_id), line + 1, column + 1, false),
+        true => (
+            repo_relative_path(vfs, root, file_id),
+            line + 1,
+            column + 1,
+            false,
+        ),
         false => match relocate_out_of_root(db, sema, vfs, root, f) {
             Some(loc) => (loc.file, loc.line, loc.column, true),
-            None => (repo_relative_path(vfs, root, file_id), line + 1, column + 1, false),
+            None => (
+                repo_relative_path(vfs, root, file_id),
+                line + 1,
+                column + 1,
+                false,
+            ),
         },
     };
 
@@ -621,8 +669,11 @@ fn push(
     let ret_str = f.ret_type(db).display(db, display_target).to_string();
     // Rust always has exactly one return type; "()" means no meaningful result,
     // which magma represents as an empty results list (matching Go's no-return).
-    let results =
-        if ret_str == "()" { Vec::new() } else { vec![model::Result_ { ty: ret_str }] };
+    let results = if ret_str == "()" {
+        Vec::new()
+    } else {
+        vec![model::Result_ { ty: ret_str }]
+    };
     let doc = f.hir_docs(db).map(|d| first_sentence(d.docs()));
     // Defect 3 fix: `f.is_test(db)` alone only sees the `#[test]` attribute —
     // see `is_test_context`'s doc comment for what that misses and why.
@@ -643,13 +694,18 @@ fn push(
             // (the relocated arm) is 1-based by construction.
             line,
             column,
-            kind: if f.self_param(db).is_some() { "method" } else { "func" }.to_owned(),
+            kind: if f.self_param(db).is_some() {
+                "method"
+            } else {
+                "func"
+            }
+            .to_owned(),
             exported: f.visibility(db) == Visibility::Public,
             test,
             // NARROW #[test] signal, unlike `test` above — see
             // model::Function::test_entry for why both are needed.
             test_entry: f.is_test(db),
-            root: false,   // Task 5
+            root: false, // Task 5
             bench: f.is_bench(db),
             // H1 fix: anchored to the workspace's OWN target directory
             // (resolved via `cargo metadata`, see main.rs::discover_target_dir),
@@ -719,7 +775,9 @@ fn trait_impl_loc(
     root: &AbsPath,
     f: ra_ap_hir::Function,
 ) -> Option<model::TraitImpl> {
-    let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else { return None };
+    let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else {
+        return None;
+    };
     let tr = imp.trait_(db)?; // None => inherent impl, not a trait impl.
 
     let trait_src = tr.source(db)?;
@@ -747,20 +805,31 @@ fn trait_impl_loc(
     let self_type = match imp.self_ty(db).as_adt() {
         None => model::SelfType::NotEligible,
         Some(adt) => {
-            if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+            if !matches!(
+                adt.module(db).krate(db).origin(db),
+                CrateOrigin::Local { .. }
+            ) {
                 model::SelfType::NotEligible
             } else {
-                match adt.source(db).and_then(|src| decl_loc(db, sema, vfs, root, src)) {
-                    Some(loc) => {
-                        model::SelfType::Local { file: loc.file, line: loc.line, column: loc.column }
-                    }
+                match adt
+                    .source(db)
+                    .and_then(|src| decl_loc(db, sema, vfs, root, src))
+                {
+                    Some(loc) => model::SelfType::Local {
+                        file: loc.file,
+                        line: loc.line,
+                        column: loc.column,
+                    },
                     None => model::SelfType::Unresolved,
                 }
             }
         }
     };
 
-    Some(model::TraitImpl { trait_decl, self_type })
+    Some(model::TraitImpl {
+        trait_decl,
+        self_type,
+    })
 }
 
 /// Resolves an item's own declaration to a repo-relative (file, 1-based
@@ -835,7 +904,9 @@ fn decl_loc_with_file<N: AstNode + HasName>(
 /// returning `None` — so nothing in the macro-kind path even sees it as an
 /// expansion. See `relocate_out_of_root` for the repair.
 fn is_under_root(vfs: &Vfs, root: &AbsPath, file_id: FileId) -> bool {
-    vfs.file_path(file_id).as_path().is_some_and(|p| p.starts_with(root))
+    vfs.file_path(file_id)
+        .as_path()
+        .is_some_and(|p| p.starts_with(root))
 }
 
 /// Family F repair: a workspace-local function whose own declaration resolves
@@ -867,10 +938,13 @@ fn relocate_out_of_root(
     root: &AbsPath,
     f: ra_ap_hir::Function,
 ) -> Option<model::Loc> {
-    let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else { return None };
+    let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else {
+        return None;
+    };
 
     let in_root = |cand: Option<(FileId, model::Loc)>| {
-        cand.filter(|(fid, _)| is_under_root(vfs, root, *fid)).map(|(_, loc)| loc)
+        cand.filter(|(fid, _)| is_under_root(vfs, root, *fid))
+            .map(|(_, loc)| loc)
     };
 
     // (1) the impl block. `ast::Impl` has no name token, so `decl_loc_with_file`
@@ -893,10 +967,16 @@ fn relocate_out_of_root(
 
     // (2) the self type's declaration — the derive case.
     let adt = imp.self_ty(db).as_adt()?;
-    if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+    if !matches!(
+        adt.module(db).krate(db).origin(db),
+        CrateOrigin::Local { .. }
+    ) {
         return None;
     }
-    in_root(adt.source(db).and_then(|src| decl_loc_with_file(db, sema, vfs, root, src)))
+    in_root(
+        adt.source(db)
+            .and_then(|src| decl_loc_with_file(db, sema, vfs, root, src)),
+    )
 }
 
 /// The real-file/macro-expansion location handling `push` and
@@ -943,7 +1023,15 @@ fn first_sentence(text: &str) -> String {
     let trimmed = text.trim();
     match trimmed.find(". ") {
         Some(i) => trimmed[..=i].to_owned(),
-        None => trimmed.lines().next().unwrap_or("").trim_end_matches('.').to_owned() + ".",
+        None => {
+            trimmed
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('.')
+                .to_owned()
+                + "."
+        }
     }
 }
 
@@ -955,7 +1043,11 @@ fn module_path(db: &RootDatabase, f: ra_ap_hir::Function) -> String {
 /// Same as `module_path`, taking the `Module` directly — `push_const`/
 /// `push_static` have no `ra_ap_hir::Function` to call `.module(db)` on.
 fn module_path_of(db: &RootDatabase, module: Module) -> String {
-    let krate = module.krate(db).display_name(db).map(|d| d.to_string()).unwrap_or_default();
+    let krate = module
+        .krate(db)
+        .display_name(db)
+        .map(|d| d.to_string())
+        .unwrap_or_default();
     let mut parts: Vec<String> = module
         .path_to_root(db)
         .into_iter()

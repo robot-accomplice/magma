@@ -39,7 +39,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use ra_ap_hir::{AsAssocItem, AssocItemContainer, Crate, HasVisibility, ModuleDef, ScopeDef, Visibility};
+use ra_ap_hir::{
+    AsAssocItem, AssocItemContainer, Crate, HasVisibility, ModuleDef, ScopeDef, Visibility,
+};
 use ra_ap_ide_db::RootDatabase;
 
 use crate::model;
@@ -57,8 +59,9 @@ pub fn mark(db: &RootDatabase, funcs: &mut [(model::Function, ra_ap_hir::Functio
             continue;
         }
         let krate = f.module(db).krate(db);
-        let public =
-            public_by_crate.entry(krate).or_insert_with(|| public_reachable(db, krate));
+        let public = public_by_crate
+            .entry(krate)
+            .or_insert_with(|| public_reachable(db, krate));
         node.root = f.is_main(db)
             || public.contains(&ModuleDef::Function(*f))
             || all_ancestors_public(db, *f)
@@ -100,7 +103,9 @@ fn public_reachable(db: &RootDatabase, krate: Crate) -> HashSet<ModuleDef> {
             continue;
         }
         for (_, def) in m.scope(db, None) {
-            let ScopeDef::ModuleDef(md) = def else { continue };
+            let ScopeDef::ModuleDef(md) = def else {
+                continue;
+            };
             if md.visibility(db) != Visibility::Public {
                 continue;
             }
@@ -126,7 +131,10 @@ fn public_reachable(db: &RootDatabase, krate: Crate) -> HashSet<ModuleDef> {
 /// primitive type, which has no `Adt` to look up).
 fn all_ancestors_public(db: &RootDatabase, f: ra_ap_hir::Function) -> bool {
     f.visibility(db) == Visibility::Public
-        && f.module(db).path_to_root(db).into_iter().all(|m| m.visibility(db) == Visibility::Public)
+        && f.module(db)
+            .path_to_root(db)
+            .into_iter()
+            .all(|m| m.visibility(db) == Visibility::Public)
 }
 
 /// A method's public-API status is a property of its `impl` (or, for a trait
@@ -181,14 +189,22 @@ fn all_ancestors_public(db: &RootDatabase, f: ra_ap_hir::Function) -> bool {
 /// shapes fall through to `all_ancestors_public` instead (always false for a
 /// method, since methods never appear in `Module::scope`, so this is a
 /// no-op fallback for the trait-impl arm above, not a regression).
-fn is_public_method(db: &RootDatabase, f: ra_ap_hir::Function, public: &HashSet<ModuleDef>) -> bool {
-    let Some(assoc) = f.as_assoc_item(db) else { return false };
+fn is_public_method(
+    db: &RootDatabase,
+    f: ra_ap_hir::Function,
+    public: &HashSet<ModuleDef>,
+) -> bool {
+    let Some(assoc) = f.as_assoc_item(db) else {
+        return false;
+    };
     match assoc.container(db) {
         AssocItemContainer::Trait(tr) => public.contains(&ModuleDef::Trait(tr)),
         AssocItemContainer::Impl(imp) => match imp.trait_(db) {
             Some(tr) => public.contains(&ModuleDef::Trait(tr)),
             None => {
-                let Some(adt) = imp.self_ty(db).as_adt() else { return false };
+                let Some(adt) = imp.self_ty(db).as_adt() else {
+                    return false;
+                };
                 public.contains(&ModuleDef::Adt(adt)) && f.visibility(db) == Visibility::Public
             }
         },

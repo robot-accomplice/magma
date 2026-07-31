@@ -105,7 +105,10 @@ fn main() -> anyhow::Result<()> {
         executed_target_code,
         CfgOverrides::default(), // cfg(test) OFF: matches an ordinary `cargo check`
     )?;
-    eprintln!("TIMING prod-config (cfg(test) off): {:.1}s", t_prod.elapsed().as_secs_f64());
+    eprintln!(
+        "TIMING prod-config (cfg(test) off): {:.1}s",
+        t_prod.elapsed().as_secs_f64()
+    );
     let (prod, prod_has_root) = match prod {
         LoadOutcome::Refused(r) => {
             println!("{}", serde_json::to_string_pretty(&r)?);
@@ -126,7 +129,10 @@ fn main() -> anyhow::Result<()> {
             selective: Default::default(),
         }, // cfg(test) ON
     )?;
-    eprintln!("TIMING test-config (cfg(test) on): {:.1}s", t_test.elapsed().as_secs_f64());
+    eprintln!(
+        "TIMING test-config (cfg(test) on): {:.1}s",
+        t_test.elapsed().as_secs_f64()
+    );
     let (test, test_has_root) = match test {
         LoadOutcome::Refused(r) => {
             println!("{}", serde_json::to_string_pretty(&r)?);
@@ -246,7 +252,10 @@ struct ConfigOutput {
 /// bare `ConfigOutput`.
 enum LoadOutcome {
     Refused(model::Refusal),
-    Ok { output: ConfigOutput, has_root: bool },
+    Ok {
+        output: ConfigOutput,
+        has_root: bool,
+    },
 }
 
 /// One full analysis pass — workspace load, enumerate, roots, edges, Family C
@@ -285,16 +294,20 @@ fn analyze_one_config(
     // (see the handover's runtime section) -- these split it so one run answers
     // the question instead of needing a matched before/after pair.
     let t_load = Instant::now();
-    let (db, vfs, _p) =
-        match load_workspace_at(Path::new(root), &cargo_config, load_config, &progress_to_stderr) {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(LoadOutcome::Refused(model::Refusal::new(
-                    false,
-                    format!("not a computable cargo workspace: {e:#}"),
-                )));
-            }
-        };
+    let (db, vfs, _p) = match load_workspace_at(
+        Path::new(root),
+        &cargo_config,
+        load_config,
+        &progress_to_stderr,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(LoadOutcome::Refused(model::Refusal::new(
+                false,
+                format!("not a computable cargo workspace: {e:#}"),
+            )));
+        }
+    };
 
     eprintln!("TIMING   load: {:.1}s", t_load.elapsed().as_secs_f64());
 
@@ -313,12 +326,21 @@ fn analyze_one_config(
     let t_enum = Instant::now();
     let mut funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
-        let mut funcs =
-            enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
+        let mut funcs = enumerate::collect(
+            db,
+            &sema,
+            &vfs,
+            root_abs.as_path(),
+            target_dir_abs.as_path(),
+        );
         roots::mark(db, &mut funcs);
         funcs
     });
-    eprintln!("TIMING   enumerate+roots: {:.1}s for {} functions", t_enum.elapsed().as_secs_f64(), funcs.len());
+    eprintln!(
+        "TIMING   enumerate+roots: {:.1}s for {} functions",
+        t_enum.elapsed().as_secs_f64(),
+        funcs.len()
+    );
 
     // Contract defect 2 (workspace with type/load errors): `load_workspace_at`
     // does NOT type-check on load — verified directly: a crate with a plain
@@ -332,9 +354,16 @@ fn analyze_one_config(
     // in value here: `load_workspace_at` already succeeded, running build
     // scripts and expanding proc macros.
     let t_diag = Instant::now();
-    let error_files =
-        workspace_type_errors(&analysis, &vfs, root_abs.as_path(), target_dir_abs.as_path())?;
-    eprintln!("TIMING   diagnostics: {:.1}s", t_diag.elapsed().as_secs_f64());
+    let error_files = workspace_type_errors(
+        &analysis,
+        &vfs,
+        root_abs.as_path(),
+        target_dir_abs.as_path(),
+    )?;
+    eprintln!(
+        "TIMING   diagnostics: {:.1}s",
+        t_diag.elapsed().as_secs_f64()
+    );
     if !error_files.is_empty() {
         return Ok(LoadOutcome::Refused(model::Refusal::new(
             executed_target_code,
@@ -402,7 +431,10 @@ fn analyze_one_config(
     let mut functions: Vec<model::Function> = funcs.into_iter().map(|(mf, _f)| mf).collect();
     functions.extend(init_nodes);
 
-    Ok(LoadOutcome::Ok { output: ConfigOutput { functions, calls }, has_root })
+    Ok(LoadOutcome::Ok {
+        output: ConfigOutput { functions, calls },
+        has_root,
+    })
 }
 
 /// Node identity used to merge the two configs — deliberately NOT either
@@ -434,7 +466,13 @@ fn analyze_one_config(
 type NodeKey = (String, String, u32, u32, String);
 
 fn node_key(f: &model::Function) -> NodeKey {
-    (f.pkg.clone(), f.file.clone(), f.line, f.column, f.symbol.clone())
+    (
+        f.pkg.clone(),
+        f.file.clone(),
+        f.line,
+        f.column,
+        f.symbol.clone(),
+    )
 }
 
 /// Merges two full analysis passes — cfg(test) off (`prod`) and cfg(test) on
@@ -537,10 +575,18 @@ fn remap_and_aggregate(
     agg: &mut HashMap<(u32, u32), model::Call>,
 ) {
     for c in calls {
-        let Some(from_key) = id_to_key.get(&c.from) else { continue };
-        let Some(to_key) = id_to_key.get(&c.to) else { continue };
-        let Some(&from) = key_to_global.get(from_key) else { continue };
-        let Some(&to) = key_to_global.get(to_key) else { continue };
+        let Some(from_key) = id_to_key.get(&c.from) else {
+            continue;
+        };
+        let Some(to_key) = id_to_key.get(&c.to) else {
+            continue;
+        };
+        let Some(&from) = key_to_global.get(from_key) else {
+            continue;
+        };
+        let Some(&to) = key_to_global.get(to_key) else {
+            continue;
+        };
         agg.entry((from, to))
             .and_modify(|existing| {
                 if c.kind == "static" {
@@ -580,10 +626,8 @@ fn run_outgoing_mode(
         match load_workspace_at(Path::new(root), &cargo_config, load_config, &|_s| {}) {
             Ok(v) => v,
             Err(e) => {
-                let r = model::Refusal::new(
-                    false,
-                    format!("not a computable cargo workspace: {e:#}"),
-                );
+                let r =
+                    model::Refusal::new(false, format!("not a computable cargo workspace: {e:#}"));
                 println!("{}", serde_json::to_string_pretty(&r)?);
                 std::process::exit(0);
             }
@@ -595,13 +639,21 @@ fn run_outgoing_mode(
 
     let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
-        let mut funcs =
-            enumerate::collect(db, &sema, &vfs, root_abs.as_path(), target_dir_abs.as_path());
+        let mut funcs = enumerate::collect(
+            db,
+            &sema,
+            &vfs,
+            root_abs.as_path(),
+            target_dir_abs.as_path(),
+        );
         roots::mark(db, &mut funcs);
         funcs
     });
 
-    let cfg = CallHierarchyConfig { exclude_tests: false, ra_fixture: RaFixtureConfig::default() };
+    let cfg = CallHierarchyConfig {
+        exclude_tests: false,
+        ra_fixture: RaFixtureConfig::default(),
+    };
     let mut edges = 0usize;
     for (mf, f) in &funcs {
         let Some(pos) = pos_of(db, *f) else { continue };
@@ -651,7 +703,9 @@ fn discover_target_dir(root_abs: &AbsPathBuf) -> anyhow::Result<AbsPathBuf> {
         .get("target_directory")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("cargo metadata output missing target_directory"))?;
-    Ok(AbsPathBuf::assert_utf8(std::path::PathBuf::from(target_directory)))
+    Ok(AbsPathBuf::assert_utf8(std::path::PathBuf::from(
+        target_directory,
+    )))
 }
 
 /// Repo-relative paths of every workspace-local `.rs` file (real files under
@@ -680,7 +734,9 @@ fn workspace_type_errors(
     };
     let mut bad_files = Vec::new();
     for (file_id, vfs_path) in vfs.iter() {
-        let Some(p) = vfs_path.as_path() else { continue };
+        let Some(p) = vfs_path.as_path() else {
+            continue;
+        };
         if !p.starts_with(root) || p.starts_with(target_dir) {
             continue;
         }
