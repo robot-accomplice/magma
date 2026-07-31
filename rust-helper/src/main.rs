@@ -12,8 +12,8 @@ use std::time::Instant;
 use ra_ap_cfg::{CfgAtom, CfgDiff};
 use ra_ap_hir::{HasSource, Semantics};
 use ra_ap_ide::{
-    Analysis, AnalysisHost, AssistResolveStrategy, CallHierarchyConfig, DiagnosticsConfig,
-    FilePosition, Severity,
+    AnalysisHost, AssistResolveStrategy, CallHierarchyConfig, DiagnosticsConfig, FilePosition,
+    Severity,
 };
 use ra_ap_ide_db::ra_fixture::RaFixtureConfig;
 use ra_ap_ide_db::RootDatabase;
@@ -23,7 +23,7 @@ use ra_ap_paths::{AbsPath, AbsPathBuf};
 use ra_ap_project_model::{CargoConfig, CfgOverrides, RustLibSource};
 use ra_ap_syntax::ast::HasName;
 use ra_ap_syntax::AstNode;
-use ra_ap_vfs::Vfs;
+use ra_ap_vfs::{FileId, Vfs};
 
 /// Exit codes. Deliberately mirrored on Go's convention rather than the
 /// (inverted) convention this binary shipped with before Task C: a soft,
@@ -273,9 +273,15 @@ fn analyze_one_config(
     executed_target_code: bool,
     cfg_overrides: CfgOverrides,
 ) -> anyhow::Result<LoadOutcome> {
-    let mut cargo_config = CargoConfig::default();
-    cargo_config.sysroot = Some(RustLibSource::Discover);
-    cargo_config.cfg_overrides = cfg_overrides;
+    // Both fields are load-bearing (see the handover's load-configuration
+    // facts); expressed as an initializer rather than post-construction
+    // assignment so `clippy::field_reassign_with_default` passes without an
+    // allow. Behaviourally identical.
+    let cargo_config = CargoConfig {
+        sysroot: Some(RustLibSource::Discover),
+        cfg_overrides,
+        ..CargoConfig::default()
+    };
 
     // Contract defect 2 (not a cargo project / workspace load failure):
     // `load_workspace_at` fails at `ProjectManifest::discover_single` or
@@ -312,7 +318,8 @@ fn analyze_one_config(
     eprintln!("TIMING   load: {:.1}s", t_load.elapsed().as_secs_f64());
 
     let host = AnalysisHost::with_database(db);
-    let analysis = host.analysis();
+    // No single `Analysis` snapshot here any more: `workspace_type_errors`
+    // takes the host and makes one snapshot per worker thread.
     let db = host.raw_database();
 
     // Function ids are the index of the function in this config's OWN
@@ -354,12 +361,8 @@ fn analyze_one_config(
     // in value here: `load_workspace_at` already succeeded, running build
     // scripts and expanding proc macros.
     let t_diag = Instant::now();
-    let error_files = workspace_type_errors(
-        &analysis,
-        &vfs,
-        root_abs.as_path(),
-        target_dir_abs.as_path(),
-    )?;
+    let error_files =
+        workspace_type_errors(&host, &vfs, root_abs.as_path(), target_dir_abs.as_path())?;
     eprintln!(
         "TIMING   diagnostics: {:.1}s",
         t_diag.elapsed().as_secs_f64()
@@ -615,11 +618,14 @@ fn run_outgoing_mode(
     target_dir_abs: &AbsPathBuf,
     load_config: &LoadCargoConfig,
 ) -> anyhow::Result<()> {
-    let mut cargo_config = CargoConfig::default();
-    cargo_config.sysroot = Some(RustLibSource::Discover);
-    cargo_config.cfg_overrides = CfgOverrides {
-        global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
-        selective: Default::default(),
+    // Initializer form, same reason as `analyze_one_config`.
+    let cargo_config = CargoConfig {
+        sysroot: Some(RustLibSource::Discover),
+        cfg_overrides: CfgOverrides {
+            global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
+            selective: Default::default(),
+        },
+        ..CargoConfig::default()
     };
 
     let (db, vfs, _p) =
@@ -721,8 +727,29 @@ fn discover_target_dir(root_abs: &AbsPathBuf) -> anyhow::Result<AbsPathBuf> {
 /// load/type errors and refusing on those would over-refuse a perfectly
 /// computable workspace. `disable_experimental`/`style_lints: false` for the
 /// same reason: only RA's core, non-experimental diagnostics gate this.
+///
+/// **Run in parallel, because this phase dominates everything else.** Measured
+/// on `roboticus-rust`: 1412.3s of a 1700.8s run — 83% — against 157s for the
+/// entire walk. It was single-threaded, which the same run proves independently
+/// (`user 1286s` against `real 1701s`: had it used the cores, user time would
+/// have exceeded wall-clock). Per-file diagnostics are independent, so this
+/// chunks the file list across `available_parallelism` threads, each with its
+/// own `AnalysisHost::analysis()` snapshot — a cheap `Arc` clone of the same
+/// salsa database, not a second copy of the analysis.
+///
+/// Semantics are unchanged, deliberately: the same files, the same
+/// `full_diagnostics` call, the same `Severity::Error` test. Only the order in
+/// which files are visited differs, and the result is sorted, so the output is
+/// byte-identical to the serial version. Parallelising was chosen over
+/// narrowing WHICH diagnostics are computed precisely because it cannot change
+/// the answer — narrowing could, and this is a correctness-critical refusal
+/// path (contract defect 2).
+///
+/// A thread that panics is propagated rather than swallowed: a lost chunk would
+/// silently under-report type errors, i.e. turn a refusal into a confident
+/// wrong map, which is the one outcome this function exists to prevent.
 fn workspace_type_errors(
-    analysis: &Analysis,
+    host: &AnalysisHost,
     vfs: &Vfs,
     root: &AbsPath,
     target_dir: &AbsPath,
@@ -732,21 +759,60 @@ fn workspace_type_errors(
         disable_experimental: true,
         ..DiagnosticsConfig::test_sample()
     };
+
+    let targets: Vec<FileId> = vfs
+        .iter()
+        .filter_map(|(file_id, vfs_path)| {
+            let p = vfs_path.as_path()?;
+            if !p.starts_with(root) || p.starts_with(target_dir) || p.extension() != Some("rs") {
+                return None;
+            }
+            Some(file_id)
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(targets.len());
+    let chunk = targets.len().div_ceil(threads);
+
+    let chunk_results: Vec<anyhow::Result<Vec<FileId>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .chunks(chunk)
+            .map(|files| {
+                let analysis = host.analysis();
+                let config = &config;
+                scope.spawn(move || -> anyhow::Result<Vec<FileId>> {
+                    let mut bad = Vec::new();
+                    for &file_id in files {
+                        let diags = analysis
+                            .full_diagnostics(config, AssistResolveStrategy::None, file_id)
+                            .map_err(|_| {
+                                anyhow::anyhow!("diagnostics computation was cancelled")
+                            })?;
+                        if diags.iter().any(|d| d.severity == Severity::Error) {
+                            bad.push(file_id);
+                        }
+                    }
+                    Ok(bad)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("diagnostics thread panicked")))
+            })
+            .collect()
+    });
+
     let mut bad_files = Vec::new();
-    for (file_id, vfs_path) in vfs.iter() {
-        let Some(p) = vfs_path.as_path() else {
-            continue;
-        };
-        if !p.starts_with(root) || p.starts_with(target_dir) {
-            continue;
-        }
-        if p.extension() != Some("rs") {
-            continue;
-        }
-        let diags = analysis
-            .full_diagnostics(&config, AssistResolveStrategy::None, file_id)
-            .map_err(|_| anyhow::anyhow!("diagnostics computation was cancelled"))?;
-        if diags.iter().any(|d| d.severity == Severity::Error) {
+    for result in chunk_results {
+        for file_id in result? {
             bad_files.push(enumerate::repo_relative_path(vfs, root, file_id));
         }
     }
