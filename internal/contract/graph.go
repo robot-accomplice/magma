@@ -87,13 +87,24 @@ type Edge struct {
 // Graph is the primary artifact: the call graph of a repository at one SHA.
 // _dead / _test-only notes are derived from it, not computed separately.
 type Graph struct {
-	ContractVersion     string `json:"contract_version"`
-	Generator           string `json:"generator"`
-	Language            string `json:"language"`
-	Module              string `json:"module"`
-	SHA                 string `json:"sha"`
-	Tree                string `json:"tree"`
-	Fidelity            string `json:"fidelity"` // what an edge MEANS here (e.g. "rta", "syntactic")
+	ContractVersion string `json:"contract_version"`
+	Generator       string `json:"generator"`
+	Language        string `json:"language"`
+	Module          string `json:"module"`
+	SHA             string `json:"sha"`
+	Tree            string `json:"tree"`
+	Fidelity        string `json:"fidelity"` // what an edge MEANS here (e.g. "rta", "syntactic")
+	// ExecutedTargetCode records whether producing this graph RAN the analysed
+	// repository's own code. Go never does: it type-checks only, so the Go
+	// backend leaves this false. The Rust backend does — rust-analyzer executes
+	// `build.rs` scripts and expands proc macros to load a workspace at all — and
+	// the helper reports it per run rather than hard-coding it, so it stays
+	// honest if a sandboxed mode is ever added.
+	//
+	// A trust-boundary fact, which is why it is carried explicitly rather than
+	// left for a consumer to infer from `language == "rust"`. The helper has
+	// always emitted it; until now magma parsed and dropped it.
+	ExecutedTargetCode  bool   `json:"executed_target_code"`
 	Computable          bool   `json:"computable"`
 	NotComputableReason string `json:"not_computable_reason,omitempty"`
 	Nodes               []Node `json:"nodes"`

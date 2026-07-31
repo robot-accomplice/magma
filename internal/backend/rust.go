@@ -143,6 +143,11 @@ func (rustBackend) BuildGraph(repo string, meta contract.Meta, progress Progress
 		})
 	}
 
+	// The helper's own answer, carried through rather than dropped: analysing a
+	// Rust workspace runs build scripts and expands proc macros, which a
+	// consumer is entitled to know without inferring it from the language.
+	g.ExecutedTargetCode = env.ExecutedTargetCode
+
 	step("analyzing reachability")
 	markReachable(nodes, edges, env.Functions)
 	assignFan(nodes, edges)
