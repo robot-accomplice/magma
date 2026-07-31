@@ -216,3 +216,29 @@ func TestRustProgressLineSplitting(t *testing.T) {
 		}
 	}
 }
+
+// `executed_target_code` is a trust-boundary fact: analysing a Rust workspace
+// RUNS the repo's own code (build scripts execute, proc macros expand), which
+// analysing Go never does. The helper has always reported it; magma parsed and
+// dropped it until the post-wiring review noticed. A consumer must be able to
+// read it rather than infer it from `language == "rust"` — which would also be
+// wrong the moment a sandboxed mode exists.
+func TestRustExecutedTargetCodeIsCarriedNotDropped(t *testing.T) {
+	var env helperEnvelope
+	mustUnmarshal(t, `{"contract_version":"magma-rust-helper/1",
+		"executed_target_code":true,"functions":[],"calls":[]}`, &env)
+	if !env.ExecutedTargetCode {
+		t.Fatal("envelope must decode executed_target_code")
+	}
+
+	// And it must reach the contract graph, which is what Architext reads.
+	g := contract.NewGraph(contract.Meta{}, "rust", "semantic")
+	g.ExecutedTargetCode = env.ExecutedTargetCode
+	blob, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), `"executed_target_code":true`) {
+		t.Errorf("contract.Graph must serialize executed_target_code, got: %s", blob)
+	}
+}
