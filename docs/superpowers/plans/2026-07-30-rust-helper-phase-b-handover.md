@@ -1,14 +1,15 @@
 # Rust helper — Phase B handover
 
 > # ▶ START AT THE BOTTOM
-> **Jump to "SESSION 2026-07-31 (later)" at the end of this document.** It is the current state
+> **Jump to "SESSION 2026-07-31 (later still)" at the end of this document.** It is the current state
 > and it supersedes everything above it — including the section titled "FINAL HANDOFF", which was
 > final only for the session that wrote it. Everything before it is the historical record of how
 > the findings were reached: useful for *why*, misleading for *what is true now*.
 >
 > One-line status: Phase B closed the oracle pipeline, all five contract defects, and **all six
-> families A–F**, including the `?` and `Drop` desugaring gaps. 15/15 fixtures pass.
-> **Remaining: the magma-side wiring, and a fresh adversarial review.**
+> families A–F**, including the `?` and `Drop` desugaring gaps. The Rust backend is WIRED.
+> 15/15 rust fixtures pass; Go suite and golangci-lint green.
+> **Remaining: a runtime measurement on a quiet machine, a fresh adversarial review, and Rust CI.**
 > Per the user: **the release does not happen until all of it is done.**
 
 **Originally written 2026-07-30 at `df8cba4`. Code complete through `23d2a95`; wiring and review
