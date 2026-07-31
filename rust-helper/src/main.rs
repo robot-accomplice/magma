@@ -280,6 +280,11 @@ fn analyze_one_config(
     // the TIMING line below is not printed until that whole phase is over. A
     // caller (see internal/backend/rust.go) surfaces these as live progress, so
     // a magma run on a real Rust repo is not silent for ten-plus minutes.
+    // Phase timings. The per-config TIMING line covered load AND walk together,
+    // which made the family B drop arm's cost unattributable from a single run
+    // (see the handover's runtime section) -- these split it so one run answers
+    // the question instead of needing a matched before/after pair.
+    let t_load = Instant::now();
     let (db, vfs, _p) =
         match load_workspace_at(Path::new(root), &cargo_config, load_config, &progress_to_stderr) {
             Ok(v) => v,
@@ -290,6 +295,8 @@ fn analyze_one_config(
                 )));
             }
         };
+
+    eprintln!("TIMING   load: {:.1}s", t_load.elapsed().as_secs_f64());
 
     let host = AnalysisHost::with_database(db);
     let analysis = host.analysis();
@@ -303,6 +310,7 @@ fn analyze_one_config(
     // Family D adaptation: `mut` because `walk::edges` below now takes
     // `&mut` (it records a macro-expansion-depth-guard disclosure directly
     // on the originating node — see model::Function::macro_truncated).
+    let t_enum = Instant::now();
     let mut funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
         let mut funcs =
@@ -310,6 +318,7 @@ fn analyze_one_config(
         roots::mark(db, &mut funcs);
         funcs
     });
+    eprintln!("TIMING   enumerate+roots: {:.1}s for {} functions", t_enum.elapsed().as_secs_f64(), funcs.len());
 
     // Contract defect 2 (workspace with type/load errors): `load_workspace_at`
     // does NOT type-check on load — verified directly: a crate with a plain
@@ -322,8 +331,10 @@ fn analyze_one_config(
     // the edges computation. `executed_target_code` is honestly the passed-
     // in value here: `load_workspace_at` already succeeded, running build
     // scripts and expanding proc macros.
+    let t_diag = Instant::now();
     let error_files =
         workspace_type_errors(&analysis, &vfs, root_abs.as_path(), target_dir_abs.as_path())?;
+    eprintln!("TIMING   diagnostics: {:.1}s", t_diag.elapsed().as_secs_f64());
     if !error_files.is_empty() {
         return Ok(LoadOutcome::Refused(model::Refusal::new(
             executed_target_code,
@@ -344,10 +355,22 @@ fn analyze_one_config(
     // thread. Analysis::with_db does this internally; using Semantics directly
     // does not, and inference panics with "Try to use attached db, but not db
     // is attached".
+    // This is the phase that carries family B's desugaring work, including the
+    // drop arm's per-expression `type_of_expr` — the one whose cost is still
+    // unattributed. Timed separately from the load above for exactly that
+    // reason; `walk` and `init_walk` are reported apart so a cost landing in
+    // one is not blamed on the other.
+    let t_walk = Instant::now();
     let (calls, init_nodes) = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
         // `&mut funcs`: Family D adaptation, see the `mut` binding above.
         let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &mut funcs, &index);
+        eprintln!(
+            "TIMING   walk (function bodies): {:.1}s for {} edges",
+            t_walk.elapsed().as_secs_f64(),
+            calls.len()
+        );
+        let t_init = Instant::now();
         // Family C: gives every const/static/associated-const initializer
         // its own synthesized node (a real id in this pass's `functions`
         // array, never an invented/dangling one), then walks each
@@ -368,6 +391,11 @@ fn analyze_one_config(
         let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &mut inits, &index);
         calls.extend(init_edges);
         let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
+        eprintln!(
+            "TIMING   walk (initializers): {:.1}s for {} init nodes",
+            t_init.elapsed().as_secs_f64(),
+            init_nodes.len()
+        );
         (calls, init_nodes)
     });
 
