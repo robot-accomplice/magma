@@ -12,8 +12,7 @@
 > **Remaining: a runtime measurement on a quiet machine, a fresh adversarial review, and Rust CI.**
 > Per the user: **the release does not happen until all of it is done.**
 
-**Originally written 2026-07-30 at `df8cba4`. Code complete through `23d2a95`; wiring and review
-remain.**
+**Originally written 2026-07-30 at `df8cba4`. Code complete and wired through `bd33377`.**
 
 Read this with `docs/superpowers/plans/2026-07-29-rust-helper.md` — specifically its final section,
 "Plan A outcome: DO NOT SHIP", which is the authoritative finding list. This document is the
