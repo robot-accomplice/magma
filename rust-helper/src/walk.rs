@@ -107,7 +107,9 @@ pub fn edges<'db>(
         // code, Task 11) — without this, resolving calls inside their body
         // below panics (Semantics::find_file: node not cached).
         let _ = sema.parse_or_expand(src.file_id);
-        let Some(body) = src.value.body() else { continue };
+        let Some(body) = src.value.body() else {
+            continue;
+        };
 
         let mut sites = Vec::new();
         // Family D: `truncated` is threaded through every recursive `walk`
@@ -121,14 +123,29 @@ pub fn edges<'db>(
         // `?`'s implicit error conversion targets THIS function's error type,
         // so it is resolved once here rather than per `?` site.
         let err_ty = try_error_type(db, *f);
-        let ctx = BodyCtx { err_ty: err_ty.as_ref(), drop_glue: &drop_glue };
-        walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated, &ctx);
+        let ctx = BodyCtx {
+            err_ty: err_ty.as_ref(),
+            drop_glue: &drop_glue,
+        };
+        walk(
+            sema,
+            body.syntax(),
+            &mut sites,
+            0,
+            db,
+            vfs,
+            root,
+            &mut truncated,
+            &ctx,
+        );
         if truncated {
             node.macro_truncated = true;
         }
 
         for s in sites {
-            let Some(&to) = index.get(&s.to) else { continue }; // out of workspace
+            let Some(&to) = index.get(&s.to) else {
+                continue;
+            }; // out of workspace
             let key = (node.id, to);
             agg.entry(key)
                 .and_modify(|c| {
@@ -179,28 +196,55 @@ pub fn init_edges<'db>(
     for (node, src) in inits.iter_mut() {
         let mut sites = Vec::new();
         let mut truncated = false; // Family D — see edges()'s identical comment
-        // Both `BodyCtx` channels are deliberately inert for an initializer.
-        // `err_ty: None` — an initializer is not a function and has no
-        // declared return type, so there is no error type for `?` to convert
-        // INTO, and `?` cannot appear in one at all. `drop_impls: &[]` — a
-        // `static` is never dropped (it lives for the whole program), and a
-        // `const` is inlined at each USE site, so the drop that a const of a
-        // droppable type causes happens in the using function's body, which
-        // `edges()` walks. Attributing it here would put the edge on the
-        // wrong node.
-        let ctx = BodyCtx { err_ty: None, drop_glue: &HashMap::new() };
+                                   // Both `BodyCtx` channels are deliberately inert for an initializer.
+                                   // `err_ty: None` — an initializer is not a function and has no
+                                   // declared return type, so there is no error type for `?` to convert
+                                   // INTO, and `?` cannot appear in one at all. `drop_impls: &[]` — a
+                                   // `static` is never dropped (it lives for the whole program), and a
+                                   // `const` is inlined at each USE site, so the drop that a const of a
+                                   // droppable type causes happens in the using function's body, which
+                                   // `edges()` walks. Attributing it here would put the edge on the
+                                   // wrong node.
+        let ctx = BodyCtx {
+            err_ty: None,
+            drop_glue: &HashMap::new(),
+        };
         match src {
             InitSource::Const(c) => {
                 let Some(csrc) = c.source(db) else { continue };
                 let _ = sema.parse_or_expand(csrc.file_id);
-                let Some(body) = csrc.value.body() else { continue };
-                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated, &ctx);
+                let Some(body) = csrc.value.body() else {
+                    continue;
+                };
+                walk(
+                    sema,
+                    body.syntax(),
+                    &mut sites,
+                    0,
+                    db,
+                    vfs,
+                    root,
+                    &mut truncated,
+                    &ctx,
+                );
             }
             InitSource::Static(s) => {
                 let Some(ssrc) = s.source(db) else { continue };
                 let _ = sema.parse_or_expand(ssrc.file_id);
-                let Some(body) = ssrc.value.body() else { continue };
-                walk(sema, body.syntax(), &mut sites, 0, db, vfs, root, &mut truncated, &ctx);
+                let Some(body) = ssrc.value.body() else {
+                    continue;
+                };
+                walk(
+                    sema,
+                    body.syntax(),
+                    &mut sites,
+                    0,
+                    db,
+                    vfs,
+                    root,
+                    &mut truncated,
+                    &ctx,
+                );
             }
         }
         if truncated {
@@ -208,7 +252,9 @@ pub fn init_edges<'db>(
         }
 
         for s in sites {
-            let Some(&to) = index.get(&s.to) else { continue }; // out of workspace
+            let Some(&to) = index.get(&s.to) else {
+                continue;
+            }; // out of workspace
             let key = (node.id, to);
             agg.entry(key)
                 .and_modify(|c| {
@@ -263,7 +309,17 @@ fn walk<'db>(
     for n in node.descendants() {
         if let Some(mc) = ast::MacroCall::cast(n.clone()) {
             if let Some(exp) = sema.expand_macro_call(&mc) {
-                walk(sema, &exp.value, out, depth + 1, db, vfs, root, truncated, ctx);
+                walk(
+                    sema,
+                    &exp.value,
+                    out,
+                    depth + 1,
+                    db,
+                    vfs,
+                    root,
+                    truncated,
+                    ctx,
+                );
             }
         }
         if let Some(call) = ast::CallExpr::cast(n.clone()) {
@@ -424,8 +480,10 @@ fn walk<'db>(
         // dead. See `drop_glue_map`.
         if !ctx.drop_glue.is_empty() {
             if let Some(expr) = ast::Expr::cast(n.clone()) {
-                if let Some(adt) =
-                    sema.type_of_expr(&expr).map(|i| i.original).and_then(|t| t.as_adt())
+                if let Some(adt) = sema
+                    .type_of_expr(&expr)
+                    .map(|i| i.original)
+                    .and_then(|t| t.as_adt())
                 {
                     for drop_fn in ctx.drop_glue.get(&adt).into_iter().flatten() {
                         out.push(site(sema, &n, *drop_fn, true, db, vfs, root));
@@ -450,15 +508,21 @@ fn walk<'db>(
         // (§Non-negotiable: fails toward live), and parsing the spec to
         // pick exactly one would only ever narrow, never fix, a missed edge.
         if let Some(fargs) = ast::FormatArgsExpr::cast(n.clone()) {
-            for arg in fargs.syntax().children().filter_map(ast::FormatArgsArg::cast) {
+            for arg in fargs
+                .syntax()
+                .children()
+                .filter_map(ast::FormatArgsArg::cast)
+            {
                 let Some(arg_expr) = arg.expr() else { continue };
                 let Some(ty) = sema.type_of_expr(&arg_expr).map(|info| info.original) else {
                     continue;
                 };
-                for trait_ in
-                    [core_trait(db, &["fmt"], "Display"), core_trait(db, &["fmt"], "Debug")]
-                        .into_iter()
-                        .flatten()
+                for trait_ in [
+                    core_trait(db, &["fmt"], "Display"),
+                    core_trait(db, &["fmt"], "Debug"),
+                ]
+                .into_iter()
+                .flatten()
                 {
                     push_trait_method_edges(sema, &n, &ty, trait_, "fmt", out, db, vfs, root);
                 }
@@ -500,14 +564,17 @@ fn walk<'db>(
                             root,
                         );
                         let into_iter_alias =
-                            into_iter_trait.items(db).into_iter().find_map(|item| match item {
-                                AssocItem::TypeAlias(alias)
-                                    if alias.name(db).as_str() == "IntoIter" =>
-                                {
-                                    Some(alias)
-                                }
-                                _ => None,
-                            });
+                            into_iter_trait
+                                .items(db)
+                                .into_iter()
+                                .find_map(|item| match item {
+                                    AssocItem::TypeAlias(alias)
+                                        if alias.name(db).as_str() == "IntoIter" =>
+                                    {
+                                        Some(alias)
+                                    }
+                                    _ => None,
+                                });
                         let iter_ty = into_iter_alias
                             .and_then(|alias| src_ty.normalize_trait_assoc_type(db, &[], alias))
                             .unwrap_or(src_ty);
@@ -631,8 +698,7 @@ fn drop_glue_map(db: &RootDatabase) -> HashMap<Adt, Vec<ra_ap_hir::Function>> {
     }
 
     let adts = local_adts(db);
-    let owns: HashMap<Adt, Vec<Adt>> =
-        adts.iter().map(|&a| (a, owned_adts(db, a))).collect();
+    let owns: HashMap<Adt, Vec<Adt>> = adts.iter().map(|&a| (a, owned_adts(db, a))).collect();
 
     let mut map: HashMap<Adt, Vec<ra_ap_hir::Function>> = HashMap::new();
     for &start in &adts {
@@ -688,7 +754,11 @@ fn owned_adts(db: &RootDatabase, adt: Adt) -> Vec<Adt> {
     let fields = match adt {
         Adt::Struct(s) => s.fields(db_dyn),
         Adt::Union(u) => u.fields(db_dyn),
-        Adt::Enum(e) => e.variants(db_dyn).into_iter().flat_map(|v| v.fields(db_dyn)).collect(),
+        Adt::Enum(e) => e
+            .variants(db_dyn)
+            .into_iter()
+            .flat_map(|v| v.fields(db_dyn))
+            .collect(),
     };
     let mut out = Vec::new();
     for field in fields {
@@ -721,11 +791,18 @@ fn collect_adts_in_type(ty: &ra_ap_hir::Type<'_>, out: &mut Vec<Adt>, depth: usi
 /// Restricted to `CrateOrigin::Local` because an edge to a non-local `drop`
 /// would be discarded by `edges`' `index` lookup anyway.
 fn local_drop_impls(db: &RootDatabase) -> Vec<(Adt, ra_ap_hir::Function)> {
-    let Some(drop_trait) = core_trait(db, &["ops"], "Drop") else { return Vec::new() };
+    let Some(drop_trait) = core_trait(db, &["ops"], "Drop") else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for imp in Impl::all_for_trait(db, drop_trait) {
-        let Some(adt) = imp.self_ty(db).as_adt() else { continue };
-        if !matches!(adt.module(db).krate(db).origin(db), CrateOrigin::Local { .. }) {
+        let Some(adt) = imp.self_ty(db).as_adt() else {
+            continue;
+        };
+        if !matches!(
+            adt.module(db).krate(db).origin(db),
+            CrateOrigin::Local { .. }
+        ) {
             continue;
         }
         for item in imp.items(db) {
@@ -751,15 +828,18 @@ fn core_result_enum(db: &RootDatabase) -> Option<Adt> {
         .root_module(db)
         .children(db)
         .find(|m| m.name(db).is_some_and(|n| n.as_str() == "result"))?;
-    module.scope(db, None).into_iter().find_map(|(item_name, def)| {
-        if item_name.as_str() != "Result" {
-            return None;
-        }
-        match def {
-            ScopeDef::ModuleDef(ModuleDef::Adt(adt @ Adt::Enum(_))) => Some(adt),
-            _ => None,
-        }
-    })
+    module
+        .scope(db, None)
+        .into_iter()
+        .find_map(|(item_name, def)| {
+            if item_name.as_str() != "Result" {
+                return None;
+            }
+            match def {
+                ScopeDef::ModuleDef(ModuleDef::Adt(adt @ Adt::Enum(_))) => Some(adt),
+                _ => None,
+            }
+        })
 }
 
 fn core_trait(db: &RootDatabase, path: &[&str], name: &str) -> Option<Trait> {
@@ -768,17 +848,22 @@ fn core_trait(db: &RootDatabase, path: &[&str], name: &str) -> Option<Trait> {
         .find(|k| matches!(k.origin(db), CrateOrigin::Lang(LangCrateOrigin::Core)))?;
     let mut module = core.root_module(db);
     for seg in path {
-        module = module.children(db).find(|m| m.name(db).is_some_and(|n| n.as_str() == *seg))?;
+        module = module
+            .children(db)
+            .find(|m| m.name(db).is_some_and(|n| n.as_str() == *seg))?;
     }
-    module.scope(db, None).into_iter().find_map(|(item_name, def)| {
-        if item_name.as_str() != name {
-            return None;
-        }
-        match def {
-            ScopeDef::ModuleDef(ModuleDef::Trait(t)) => Some(t),
-            _ => None,
-        }
-    })
+    module
+        .scope(db, None)
+        .into_iter()
+        .find_map(|(item_name, def)| {
+            if item_name.as_str() != name {
+                return None;
+            }
+            match def {
+                ScopeDef::ModuleDef(ModuleDef::Trait(t)) => Some(t),
+                _ => None,
+            }
+        })
 }
 
 /// Given a function resolved via any dispatch path — a syntactic method
@@ -832,6 +917,14 @@ fn site(
     let range = sema.original_range(n);
     let file_id = range.file_id.file_id(db);
     // line_index is 0-based; magma reports 1-based (matches enumerate.rs).
-    let line = ra_ap_ide_db::line_index(db, file_id).line_col(range.range.start()).line + 1;
-    Site { to, file: enumerate::repo_relative_path(vfs, root, file_id), line, dynamic }
+    let line = ra_ap_ide_db::line_index(db, file_id)
+        .line_col(range.range.start())
+        .line
+        + 1;
+    Site {
+        to,
+        file: enumerate::repo_relative_path(vfs, root, file_id),
+        line,
+        dynamic,
+    }
 }
