@@ -40,11 +40,65 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use ra_ap_hir::{
-    AsAssocItem, AssocItemContainer, Crate, HasVisibility, ModuleDef, ScopeDef, Visibility,
+    AsAssocItem, AssocItemContainer, Crate, HasSource, HasVisibility, ModuleDef, ScopeDef,
+    Visibility,
 };
 use ra_ap_ide_db::RootDatabase;
+use ra_ap_syntax::ast::HasAttrs as _;
+use ra_ap_syntax::AstNode as _;
 
 use crate::model;
+
+/// Family G: a function whose symbol is exported to a foreign caller, via
+/// `#[no_mangle]` or `#[export_name = ".."]`. Such a function is an entry
+/// point in exactly the sense `main` is — the compiler emits the symbol, a C /
+/// Python / WASM / interrupt-vector caller invokes it, and NOTHING inside the
+/// Rust graph calls it. rustc agrees: its `dead_code` lint treats these items,
+/// and everything they reach, as live.
+///
+/// **This is not "widening roots to make something green".** The standing rule
+/// warns against inventing roots to paper over MISSING EDGES — the family B
+/// trap, where the edge exists in the program and the walker failed to find
+/// it. Here there is no edge to find, by construction: the call comes from
+/// outside the program. Withholding root status does not make the tool
+/// stricter, it makes it wrong, and it was measurably wrong — on the canonical
+/// FFI shape (`testdata/ffi_export`) the helper reported two functions dead
+/// that rustc reports live.
+///
+/// Matched on the attribute's own name rather than by path resolution, because
+/// these are built-in attributes: `no_mangle` is not a nameable item and there
+/// is nothing to resolve. That is the opposite situation from trait lookup,
+/// where name-matching would be the unsound shortcut. `AttrFlags::NO_MANGLE`
+/// exists inside `hir_def` but is not reachable at `ra_ap_* = 0.0.343`
+/// (`Function::attrs` returning it is private, and no `is_no_mangle()`
+/// accessor is exposed), so this reads the declaration's own attributes.
+///
+/// Handles the `#[unsafe(no_mangle)]` spelling Rust 2024 requires as well as
+/// the bare form. NOT handled, and deliberately: `#[cfg_attr(.., no_mangle)]`,
+/// which applies the attribute conditionally — that under-approximates toward
+/// "not a root", the same safe direction every other imprecision here takes.
+fn is_exported_symbol(db: &RootDatabase, f: ra_ap_hir::Function) -> bool {
+    let Some(src) = f.source(db) else {
+        return false;
+    };
+    src.value.attrs().any(|attr| {
+        let Some(path) = attr.path() else {
+            return false;
+        };
+        let name = path.syntax().text().to_string();
+        let name = name.trim();
+        if name == "no_mangle" || name == "export_name" {
+            return true;
+        }
+        // `#[unsafe(no_mangle)]` — the attribute's path is `unsafe` and the
+        // real name sits inside it, so fall back to the attribute's own text.
+        if name == "unsafe" {
+            let text = attr.syntax().text().to_string();
+            return text.contains("no_mangle") || text.contains("export_name");
+        }
+        false
+    })
+}
 
 /// Mark every production root: a bin target's `main`, or an item reachable
 /// from the crate root of a library crate through public bindings only. Test
@@ -63,6 +117,7 @@ pub fn mark(db: &RootDatabase, funcs: &mut [(model::Function, ra_ap_hir::Functio
             .entry(krate)
             .or_insert_with(|| public_reachable(db, krate));
         node.root = f.is_main(db)
+            || is_exported_symbol(db, *f)
             || public.contains(&ModuleDef::Function(*f))
             || all_ancestors_public(db, *f)
             || is_public_method(db, *f, public);
