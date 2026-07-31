@@ -805,3 +805,80 @@ That is the concrete value of the `test_entry` field, on a real workspace, and i
 was worth closing before wiring rather than after. Note also that the correct seed sits OUTSIDE the
 range bracketed by the two wrong ones for dead rows (59 > 33), so neither wrong option was a
 conservative approximation of it in the direction that matters.
+
+---
+
+# POST-WIRING ADVERSARIAL REVIEW — 2026-07-31
+
+Run over the wired state, three lenses (soundness / contract / instrument). It found three real
+defects, which is the answer to whether it was still warranted after 16/16 green.
+
+## Lens 1 (soundness) — FAMILY G: exported symbols are not roots
+
+**A new false-dead-code family, reproduced against rustc before any fix.** `#[no_mangle]` and
+`#[export_name]` make a function externally callable whether or not it is `pub`: the compiler emits
+the symbol and a C / Python / WASM / interrupt-vector caller invokes it, so nothing inside the Rust
+graph calls it — exactly as nothing calls `main`. rustc's `dead_code` lint treats such items, and
+everything they reach, as live. `roots.rs` knew about a bin's `main` and about publicly reachable
+items, and not about exported symbols.
+
+On a five-line crate the helper reported **two functions dead that rustc reports live**. This is the
+canonical shape of every Rust library exposed over FFI — a cdylib for C/Python/Node, a staticlib, a
+WASM export, an embedded interrupt handler — so it is not a corner case.
+
+**Second, quieter symptom:** a cdylib with NO `pub` API at all, an entirely reasonable FFI crate,
+was **refused** outright ("no roots in scope") on the false premise that it had no entry points.
+
+**Why the gate could not see it.** `oracle-diff.sh` excludes any function carrying these attributes
+from the comparison, on the sound reasoning that rustc never reports them dead even when they are,
+so the oracle cannot adjudicate them. True — and it also meant the helper's OWN answer for those
+nodes was never checked, so the attributed function reading dead was structurally invisible. Only
+the second hop, its callee, leaked through as a FATAL, and no fixture had a second hop. **That is
+five exclusions in this harness now found to mask something.** An exclusion can be perfectly sound
+as an oracle-comparison decision and still hide a user-facing defect.
+
+**Not root-widening.** The standing rule warns against inventing roots to paper over MISSING EDGES
+— the family B trap. Here there is no edge to find: the call originates outside the program. The
+control is `truly_dead`, genuinely dead, agreed dead by rustc, and still reported after the fix
+(`agree_dead: 1`). `considered` stays 4 and `excluded` stays 2 across the fix.
+
+`testdata/ffi_export`, confirmed RED first (2 FATALs both configs). 16/16 fixtures now pass.
+
+## Lens 2 (contract) — `executed_target_code` was parsed and thrown away
+
+A trust-boundary fact — producing a Rust graph RUNS the repo's own code, where Go analysis only
+type-checks — that the handover records as a SETTLED contract decision Architext had already
+declared. The helper always emitted it; magma read it into a struct member nothing consumed,
+because `contract.Graph` had no field for it. A consumer was left to infer it from
+`language == "rust"`, which is wrong the moment a sandboxed mode exists — the exact reason the
+helper derives it per run instead of hard-coding it. Now carried through to the Architext emitter.
+Go leaves it `false`, which is the correct answer for a backend that never runs target code.
+
+## Lens 3 (instrument) — Family F's refusal had no test
+
+`relocate_out_of_root` repairs every shape currently known, so `main::non_local_paths` fires on no
+fixture, and a regression breaking it would have been **silent** — precisely the failure mode the
+check exists to prevent. Now driven directly by a unit test, which was mutation-checked (disabling
+the predicate makes it fail) rather than merely observed to pass.
+
+## Also found by the CI work, not by the review
+
+**`cargo test` had been red for 26 commits.** Symbol qualification (`f20e513`) landed 42 commits
+after `tests/multi_impl.rs` was last touched; the test looked up `speak` where the helper now emits
+`<Cat as Speak>::speak`. Nothing ran `cargo test` — CI gated `gofmt`, `go vet` and the Go tests and
+never built rust-helper at all. A test nothing runs is not a test.
+
+## Identified but NOT investigated — no local code to test against
+
+`#[panic_handler]`, `#[global_allocator]`, `#[start]` are the same "the compiler calls this" shape
+as family G and plausibly share the defect. Recorded rather than fixed, because fixing them without
+a fixture would be acting on plausibility — the thing this project's own rules forbid. A no_std
+probe crate would settle it.
+
+## Standing lesson this review adds
+
+> **A workaround inside the measuring instrument can hide a hole in the thing being measured.**
+> `test_entry` was invisible because `oracle-diff.sh` solved it for itself with a regex over source
+> text. Family G's first hop was invisible because `oracle-diff.sh` excluded it. In both cases the
+> harness had coped, and coping is what stopped anyone noticing the contract could not. **When the
+> harness needs a workaround, ask what a second consumer would do without it.**
