@@ -60,6 +60,13 @@ magma finds it on `PATH`, or at `$MAGMA_RUST_HELPER`. Without it, a Rust repo is
 an install hint rather than analyzed partially — magma returns an honest map or an honest refusal,
 never a degraded one.
 
+**Rust analysis is slow, and you should expect that.** It loads the workspace twice through
+rust-analyzer (once with `cfg(test)` off, once on) and type-checks every file, because a workspace
+that does not type-check gets a refusal rather than a half-map. Measured on a 1,388-file,
+10,921-function workspace: **~20 minutes**, single invocation, most of it type-checking. Small
+crates are seconds. Progress is reported live throughout, so a long run is distinguishable from a
+hung one. Go analysis is unaffected and remains in-process and fast.
+
 ## Usage
 
 ```
