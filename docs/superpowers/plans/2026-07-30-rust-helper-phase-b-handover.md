@@ -280,3 +280,146 @@ strongest evidence to date that `magma-code-graph/1` is unambiguous. `fidelity` 
 one-sided (their schema is `{"type":"string"}`, no enum) so `"semantic"` needs no coordination.
 They have been told no Rust artifact is coming soon, and that a real emit will be sent for
 validation before anything is wired — a process now three-for-three at catching defects pre-ship.
+
+---
+
+# FINAL HANDOFF — 2026-07-31, at `c076d3a` (66 commits ahead of `develop`)
+
+**Everything above is history. This section is the current state. Start here.**
+
+Branch `feat/rust-helper-extraction`, tree clean, build green, **13/13 fixtures pass cold**,
+`libonly` and `collision` still at exactly 2 and 3 adjudicated FATALs (no exclusion widened
+anywhere across all of Phase B — checked after every task).
+
+**Release gate, stated by the user: nothing ships until all remaining work below is done.**
+Not the wiring, not a PR, not a change to the "Rust is in development" line.
+
+## Phase B outcome — all six families addressed
+
+| Family | State | Notes |
+|---|---|---|
+| **A** function-as-value | ✅ closed | `walk.rs` resolves function-valued `PathExpr`s, not only `CallExpr` callees. Emitted `dynamic` — address-taken ≠ called, over-approximating toward "live" |
+| **B** desugaring | ⚠️ **5 of 6** | Closed: operators (`+`/`-`/`[]`), `await`, `for`-loops, format-args. **Open: `?` and `Drop`** — see below |
+| **C** initializer calls | ✅ closed | Synthesized `init` nodes on Go's `init#N` precedent. `{qualified}#init`, `kind:"init"` (new *value* → one-sided), rooted |
+| **D** macro depth | ✅ closed | Limit 8→**64** on measured evidence; new `macro_truncated: bool` disclosure field |
+| **E** two loads | ✅ closed | Two workspace loads (cfg(test) off/on), merged on `(file, line, column, symbol)` identity |
+| **F** toolchain nodes | ❌ **not closed** | Needs a different kind of check entirely — see below |
+
+Also closed: the **oracle pipeline** (H1–H8) and all **five contract defects**. Both verified
+independently, not taken on report.
+
+## The three things that remain
+
+### 1. Family F — needs a workspace-root assertion, NOT a fixture
+
+`#[derive(Debug)]` makes the helper emit a node whose `file` is inside
+`~/.rustup/toolchains/…/library/core/src/fmt/mod.rs`. It is real and reproducible. **But a
+reachability comparison can structurally never catch it**: rust-analyzer marks that node
+`root:true` regardless of actual visibility, so the helper and rustc can never disagree about it,
+and no oracle fixture will ever go red. `testdata/toolchain_derive` exists and documents this; it
+is *not* coverage and must not be mistaken for it.
+
+The right check is a **direct assertion that no emitted node's `file` falls outside the workspace
+root**, run as a test or a harness pre-flight. Cheap, and it closes the family properly.
+
+### 2. `?` and `Drop` — the honest residue of family B
+
+- **`expr?`** — `Try::branch` resolves, but the load-bearing `FromResidual` → `From::from`
+  conversion **has no exposed API at `ra_ap_* = 0.0.343`**. Confirmed still open by probe
+  (`<MyErr as From>::from` reads dead before and after). Options: a targeted type-directed lookup
+  the way format-args was solved, or a pin bump — the pin is load-bearing, so bumping it is its own
+  task with its own re-validation.
+- **`Drop::drop`** — no expression node exists for scope exit at all; catching it needs
+  move/liveness analysis this walker does not do. The implementer declined to ship an unverifiable
+  heuristic, which was correct.
+
+Both are **false-dead-code sources that remain open**. `?` in particular is extremely common in
+real Rust. Do not wire without deciding explicitly what to do about them.
+
+### 3. magma-side wiring, then a fresh adversarial review
+
+Nothing is wired yet: only `detect.Go` is registered, nothing `exec`s the helper, Rust repos still
+refuse. Wiring means registering a Rust backend, invoking the helper, mapping
+`magma-rust-helper/1` → magma's internal graph, and deciding what `fidelity` and
+`executed_target_code` carry through.
+
+**Then re-run the full three-lens review.** The last one found six false-dead-code families that
+three tasks' worth of green gates had completely missed. A green gate is necessary, not sufficient.
+
+**Boundary hazard to honour when mapping:** `column`, `bench`, `trait_impl`, and now
+`macro_truncated` and `kind:"init"` exist on `magma-rust-helper/1` (helper→magma, internal). The
+Architext-facing `magma-code-graph/1` sets `additionalProperties: false`, so passing any *new
+field* through fails validation on day one. New **values** (like `kind:"init"` or
+`fidelity:"semantic"`) are one-sided and fine. Record the strip-list at the mapping boundary.
+
+## Standing principles — these were learned expensively
+
+> **Mapping every crate is not the goal.** An honest map or an honest refusal. Refusal rate is not
+> a quality metric and must never be optimised down.
+
+> **Never widen roots to make something green.** Every remaining family creates that temptation.
+> "Treat impls of non-local traits as roots" would have turned family B green while making every
+> trait impl a permanent root — destroying the ability to ever report a dead trait impl. Family B
+> correctly declined to tighten `roots.rs` at all, because format-args and `for`-loop resolution
+> only cover concrete-`Adt` types; `.to_string()`, `dyn Trait` format args, and generics are still
+> uncovered. **Roots may only be tightened after those close.**
+
+> **Add no exclusion, ever.** Four exclusions in this harness have now been found unsound. If a
+> divergence is genuinely explainable it becomes a *disclosed, baselined FATAL with a written
+> reason* — never a silent exclusion. Baselines carry per-entry `status: "open-defect"` vs
+> permanent adjudication; do not let those blur.
+
+> **One sample is not a measurement.** Family E measured the *identical* config at 176.7s and
+> >633s on repeat (>3.6× spread under load) and correctly refused to publish a "2×" figure. The
+> project had already been burned once by presenting one sample as a number (feasibility §9a).
+
+## Process lesson — use worktree isolation for parallel agents
+
+Several agents sharing one live branch cost real work twice: one task's uncommitted `walk.rs`
+edits reverted to an earlier snapshot mid-session, and **my own `git add -A` swept 514 lines of
+another task's in-flight `main.rs` into an unrelated docs commit.** File-ownership conventions kept
+the *content* from colliding but do not protect uncommitted work from a shared index.
+
+**Next time: give each parallel agent its own git worktree.** If that is not available, require
+every agent to commit before yielding and never run `git add -A` from the orchestrator.
+
+That history was split with the user's approval — the docs commit and the source commit are now
+separate and accurately titled. **Backup ref `backup/pre-split-105894b` (`9f3523f`) is still
+present**; tree hashes were verified identical before and after, so no content moved. Delete the
+ref once satisfied.
+
+## Unmeasured / deferred, with reasons
+
+- **Runtime of the 8→64 macro limit** — never measured; its timing run was killed when I told
+  family D to stop and commit ahead of a concurrent task. My call, recorded as unmeasured rather
+  than estimated.
+- **Runtime of two-load on a real workspace** — inconclusive at achievable sample size under load.
+- **`--all-targets` + package-scoped clean cost** — the test-config oracle recompiles workspace
+  packages a second time; measured only on the 13 small fixtures.
+- **Pre-existing target-dir anchoring gap** for excluded nested sub-projects (a `cargo-fuzz`
+  crate) causes a refusal on `roboticus-rust`. Unrelated to Phase B, unfixed, needs its own task.
+- **`cfg_test_global`'s `tests::uses_it` workaround is still required** — not for the original
+  reason (the merge makes it unnecessary for correctness) but because removing it reopens a
+  masking hole in `oracle-diff.sh`'s own `--all-targets` pollution.
+- **Contract residuals**: `cfg_requires_test` does not handle `any(test, …)`/`not(…)`;
+  `tests/`/`benches/` detection is path-component-based rather than real Cargo target metadata.
+
+## Separate, unrelated: the Go-side path leak
+
+`magma --architext` emits `file` values that are absolute paths into the Go build cache for
+build-cache stubs (12 nodes analyzing magma itself, 201 for roboticus; all `generated:true`).
+Same-machine determinism is intact (three `--force` runs byte-identical); **cross-machine is not**,
+since the path embeds a username and platform-specific cache root — and `--architext` writes into
+git-tracked `docs/architext/data/`. Architext confirmed 9 of 201 remain visible in their default
+view because their filter is a union, so `generated:true` does **not** mean hidden. Needs its own
+task on the Go side.
+
+## Architext — closed, nothing outstanding
+
+Both sample artifacts validated clean (`~/magma-samples/`). Badge reconciliation is **exact**:
+their predicates and magma's views, written independently, both land on **23 dead / 611 test-only**
+across 17,871 real roboticus functions, including the non-obvious `10,011 → 799 → 611` chain.
+`fidelity` confirmed one-sided (`{"type":"string"}`, no enum). They know no Rust artifact is coming
+soon and that a real emit will be sent for validation before wiring — a process now three-for-three
+at catching defects pre-ship (`tree` carrying the SHA, `executed_target_code` as a new property,
+and the union-filter correction).
