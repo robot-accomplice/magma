@@ -184,3 +184,35 @@ func mustUnmarshal(t *testing.T, s string, v any) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 }
+
+// Helper progress arrives as an arbitrarily chunked byte stream, not as tidy
+// lines: an io.Writer boundary can land mid-label. This pins that a label split
+// across two Writes is reported ONCE and whole, that non-progress stderr (cargo
+// noise, build-script output — the helper really does execute build scripts) is
+// not surfaced as magma's own progress, and that a trailing partial line is not
+// emitted before it is complete.
+func TestRustProgressLineSplitting(t *testing.T) {
+	var got []string
+	w := &progressLines{fn: func(s string) { got = append(got, s) }}
+
+	for _, chunk := range []string{
+		"PROGRESS discov", "ering sysroot\n",
+		"warning: unused something\n", // not progress — must be ignored
+		"PROGRESS cargo metadata: started\n" + "PROGRESS cargo metadata: finished\n",
+		"PROGRESS incomplete-so-far", // no newline yet — must not fire
+	} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	want := []string{"discovering sysroot", "cargo metadata: started", "cargo metadata: finished"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d labels %q, want %d %q", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("label %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
