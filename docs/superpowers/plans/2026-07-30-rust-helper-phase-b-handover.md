@@ -545,3 +545,98 @@ Both closed by finding real edges: `excluded` is 0 in both fixtures.
 - **Pre-existing target-dir anchoring gap** for excluded nested sub-projects (a `cargo-fuzz` crate)
   causes a refusal on `roboticus-rust`. Unrelated, unfixed, needs its own task.
 - **Go-side path leak** (`--architext` emitting build-cache absolute paths) still needs its own task.
+
+---
+
+# SESSION 2026-07-31 (later still) — Rust backend WIRED
+
+**Supersedes the section above.** Commit `bd33377`. magma now maps a Cargo workspace end-to-end
+(verified on `testdata/try_from`: 4 nodes, 3 edges, 0 dead — matching the helper's own output).
+15/15 rust fixtures pass, full Go suite passes, `golangci-lint` 0 issues, `gofmt` clean.
+
+## Delivery: PATH lookup with an honest refusal
+
+Decided with the user. `internal/backend/rust.go` finds `magma-rust-helper` on `PATH` or at
+`$MAGMA_RUST_HELPER`, and REFUSES with the install command when absent — not an error, not a silent
+skip. Keeps `go install` working and needs no release-pipeline change. The alternative (shipping a
+Rust cross-compile matrix in `release.yml`) still needs this fallback anyway, so it can be added
+later without rework.
+
+`README.md` updated on both counts: the "no third-party analyzer binaries to install" claim was
+true for Go and false the moment Rust is wired, and "v0.1.0 supports Go only" was stale.
+
+## The contract gap wiring exposed — this one would have shipped a wrong map
+
+`roots::mark` sets `root` for PRODUCTION entry points only. The narrow "carries a literal
+`#[test]`" signal existed **nowhere on the wire** — only as a regex over source text inside
+`scripts/oracle-diff.sh`. So a consumer reading only `magma-rust-helper/1` had no correct option:
+
+- seed all-roots on `root` → all test-only code reads dead;
+- seed on `test` → `test` is deliberately broader (cfg(test) ancestry, `tests/`/`benches/`
+  targets), so every function under a test module becomes its own root, trivially reaches itself,
+  and a genuinely dead test helper can never be reported. The exact false-agreement failure the
+  oracle harness exists to catch.
+
+`f.is_test(db)` was already computed inside `is_test_context` and collapsed into its broad OR. Now
+emitted as **`test_entry`** — a new FIELD on the internal helper→magma contract only, not on the
+Architext-facing `magma-code-graph/1`, so one-sided and needing no coordination.
+`TestRustReachabilitySeedsOnTestEntryNotTest` was confirmed to FAIL on the `test`-seeded version
+before being accepted.
+
+**Follow-up, deliberately NOT done here:** `oracle-diff.sh` can now drop its `#[test]` regex scan
+and read `test_entry` instead, replacing a text heuristic with rust-analyzer's own attribute
+resolution. Deferred because it modifies the MEASURING INSTRUMENT, which should change in a
+dedicated task with its own verification rather than as a side effect of wiring — the gate is the
+best-built piece of this branch and the handover's standing advice is not to disturb it casually.
+
+## Also fixed
+
+- **`kind:"init"` counted nowhere.** Family C's initializer nodes matched no case in
+  `notes/metrics.go`, so `Funcs+Methods < len(Nodes)` on every Rust map. Fixed in `metrics.go`
+  rather than flattened at the mapping boundary — Go's own `init#N` nodes already arrive as
+  `"func"`, so both languages now tally the same thing.
+- **`.gitignore` failed open.** It listed each fixture's `target/` on its own line; adding
+  `try_from` and `drop_glue` without adding two more lines tracked 31 files of build output.
+  Replaced the hand-maintained list with `/rust-helper/testdata/*/target/`.
+
+## Strip-list: enforced by the type, not by convention
+
+`contract.Node` has no field for `column`, `bench`, `trait_impl`, `macro_truncated`, or
+`test_entry`, so none can reach Architext, whose root is `additionalProperties: false`.
+`TestRustHelperInternalFieldsAreStripped` pins it. `bench` is consumed (it seeds all-roots
+alongside `test_entry`) rather than discarded.
+
+## RUNTIME — the open item, and what is and is not known
+
+**Known:** one config of the two on `roboticus-rust` (1388 `.rs` files, 12 `Drop` impls) took
+**769.8s**, measured, on a run CONTENDED with the fixture suite.
+
+**Not known, and not to be guessed at: whether that is a regression.** There is no matched
+before/after. The handover already records that Family E measured the *identical* config at 176.7s
+and >633s on repeat — a >3.6× spread under load — so a contended 769.8s is **not distinguishable
+from existing baseline variance**. Do not report it as a slowdown, and do not report it as fine.
+
+**The specific risk, which is real and identified.** The Family B drop arm calls
+`sema.type_of_expr` on EVERY expression node, in any crate with at least one workspace-local `Drop`
+impl. Crates with none skip it entirely (`drop_glue_map` returns empty and `walk` checks that
+first), so the common case is free — but `roboticus-rust` has 12, so it is active there.
+
+**The measurement to run, on a QUIET machine:** three runs each of one config on `roboticus-rust`,
+with and without the drop arm (a one-line early return in `drop_glue_map` isolates it exactly),
+comparing medians. Three runs, not one — this project has been burned twice by presenting a single
+sample as a number. If it does prove costly, the mitigation is cheap and already scoped: restrict
+the arm to the expression forms that actually PRODUCE values (`CallExpr`, `MethodCallExpr`,
+`RecordExpr`, `PathExpr`) instead of every expression node. That was deliberately not applied blind.
+
+## What remains
+
+1. **The runtime measurement above.**
+2. **A fresh three-lens adversarial review.** Now more clearly warranted, not less: this session
+   found FOUR defects that a 13/13 green gate had missed — family F's silent node loss and
+   fabricated cross-crate edges, the `Drop` gap being observable after all, the `test_entry`
+   contract gap, and `kind:"init"` counted nowhere. A green gate is necessary, not sufficient.
+3. **Rust has no CI coverage.** `.github/workflows/ci.yml` gates `gofmt` and Go tests only. Neither
+   `cargo build`, the fixture gate, nor `cargo fmt` runs in CI — and `cargo fmt --check` is
+   currently NOT clean across `roots.rs`/`walk.rs`/`main.rs`/`enumerate.rs` (pre-existing).
+4. **A real Rust emit should go to Architext for validation before release** — that process is
+   three-for-three at catching defects pre-ship.
