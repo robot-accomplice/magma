@@ -1,7 +1,16 @@
 # Rust helper — Phase B handover
 
-**Originally written 2026-07-30 at `df8cba4`. Phase B is now IN PROGRESS — read
-"Phase B progress" at the end of this document for current state before acting on anything here.**
+> # ▶ START AT THE BOTTOM
+> **Jump to "FINAL HANDOFF — 2026-07-31" at the end of this document.** It is the current state
+> and it supersedes everything above it. The sections in between are the historical record of how
+> the findings were reached — useful for *why*, misleading for *what is true now*.
+>
+> One-line status: Phase B closed the oracle pipeline, all five contract defects, and families
+> A, C, D, E, plus 5 of 6 desugaring forms. **Remaining: family F's workspace-root assertion,
+> the `?` and `Drop` desugaring gaps, and the magma-side wiring + a fresh adversarial review.**
+> Per the user: **the release does not happen until all of it is done.**
+
+**Originally written 2026-07-30 at `df8cba4`. Phase B is COMPLETE-BUT-FOR the three items above.**
 
 Read this with `docs/superpowers/plans/2026-07-29-rust-helper.md` — specifically its final section,
 "Plan A outcome: DO NOT SHIP", which is the authoritative finding list. This document is the
