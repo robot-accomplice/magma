@@ -782,3 +782,26 @@ sample is not a measurement; it means these two agree.
 
 Node/edge counts also reproduced exactly across both runs (10,921 functions, 24,611 calls), which
 is independent evidence for the determinism claim on a real workspace rather than a fixture.
+
+## `test_entry` — the payoff, measured on the wired pipeline
+
+Re-run with `test_entry` present (5,239 true, vs 5,574 for the broad `test` — the 335 difference is
+exactly the test-context-but-not-`#[test]` helper population). All three seeds over the same real
+10,921-function graph:
+
+| all-roots seed | seeds | unreachable | |
+|---|---|---|---|
+| `root` only | 3,707 | 5,879 | WRONG — loses all test reachability |
+| `root \|\| test \|\| bench` | 9,281 | 198 | WRONG — self-rooting hides dead helpers |
+| **`root \|\| test_entry \|\| bench`** | **8,946** | **226** | what magma now computes |
+
+Translated into what a user actually sees — dead rows (`unreachable && !generated`, matching
+`contract.Node.IsDead`):
+
+**correct seed 59 dead rows, broad seed 33. The broad seed would have hidden 26 genuinely dead
+functions — 44% of the report.**
+
+That is the concrete value of the `test_entry` field, on a real workspace, and it is why the gap
+was worth closing before wiring rather than after. Note also that the correct seed sits OUTSIDE the
+range bracketed by the two wrong ones for dead rows (59 > 33), so neither wrong option was a
+conservative approximation of it in the direction that matters.
