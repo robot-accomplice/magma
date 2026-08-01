@@ -212,3 +212,33 @@ func WriteGraph(dir string, g Graph) error {
 	b = append(b, '\n')
 	return os.WriteFile(filepath.Join(dir, "graph.json"), b, 0o644)
 }
+
+// MarshalJSON guarantees Params and Results serialize as ARRAYS, never null.
+//
+// The contract handshake with Architext froze this wording: "functions[].signature
+// is ALWAYS present (object, never omitted): {"params":[...],"results":[...]} —
+// both arrays always present, possibly empty." A nil Go slice marshals to `null`,
+// so any backend that builds a Signature without initialising both fields
+// silently breaks that.
+//
+// It happened: the Rust backend built `&Signature{}` and appended, so a function
+// with no parameters emitted `"params": null`. Architext's validator rejected the
+// first real Rust artifact over it — 68% of functions had null params, 50% null
+// results. The Go backend had always initialised both explicitly (signatureOf),
+// so the invariant lived in one backend's code rather than in the type, and the
+// second backend did not inherit it.
+//
+// Enforced here so it cannot depend on a backend author remembering. `null` and
+// `[]` are different claims — "unknown parameters" versus "no parameters" — and
+// only the second is ever true of a function magma has analysed.
+func (s Signature) MarshalJSON() ([]byte, error) {
+	type signatureJSON Signature // distinct type: avoids recursing into this method
+	out := signatureJSON(s)
+	if out.Params == nil {
+		out.Params = []Param{}
+	}
+	if out.Results == nil {
+		out.Results = []Result{}
+	}
+	return json.Marshal(out)
+}
