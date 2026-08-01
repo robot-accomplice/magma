@@ -1039,3 +1039,67 @@ because fixing the previous one unmasked it.
 Every one of the four cases fits it: `golang.go` initialising its own slices, `oracle-diff.sh`'s
 `#[test]` regex and `#[no_mangle]` exclusion, and their own validator passing a document whose
 `fidelity` was nonsense. In each, the coping component was working perfectly.
+
+---
+
+# SECOND REAL RUST PROJECT — a Bevy game (2026-08-01)
+
+Run against `dark-tower`, a Bevy 0.12 game, as a second real-world sample beyond `roboticus-rust`.
+It found a defect immediately, which is the argument for having done it.
+
+**Note it is not a git repo**, so it had to be snapshotted (APFS clone + `git init`) to analyse.
+magma's refusal for that case is clean and names the likely cause:
+`reading git metadata (is "…" a git repo?): exit status 128`.
+
+## Defect found: a symlinked root silently defeats the target-dir exclusion (FIXED, `740162d`)
+
+magma REFUSED over type errors in `target/debug/build/clang-sys-*/out/*.rs` — generated build-script
+output it should never have scanned. `cargo metadata` reports `target_directory` canonicalised while
+rust-analyzer's vfs reports paths as given; macOS resolves `/tmp` → `/private/tmp`, so the prefix
+comparison never matched.
+
+**The refusal was the mild symptom.** `enumerate.rs` anchors the `generated` flag on the same
+`target_dir` — the H1 fix — so under a symlinked root it stops firing for exactly the build-script
+output it exists to catch. `/tmp` and `/var` are symlinked on macOS and symlinked checkouts are
+ordinary on CI; `roboticus-rust` missed it only because its path has no symlink.
+
+Fixed by canonicalising once and feeding BOTH `cargo metadata` and `load_workspace_at`. Canonicalising
+only the former is worse than the bug: vfs paths would stop stripping, every node would emit an
+absolute path, and `non_local_paths` would refuse the entire run.
+
+## Measured cost of the derive over-rooting residual — it is bigger than recorded
+
+The map came out **156 nodes, 137 edges, 0 dead**:
+
+    roots            136 / 156   (87%)
+      generated       46         <- derive-relocated methods
+    exported         123
+    dead reported      0
+
+`<GameState as Clone>::clone`, `::fmt`, `::default`, `::hash`, `::eq` — all `root:true,
+exported:true`, because rust-analyzer reports a derive-generated method's own Visibility as Public.
+This document already records that as "over-reports toward LIVE, safe direction, deliberately not
+fixed", noted against a single fixture. **On a derive-heavy codebase it is 29% of all nodes rooted
+for no real reason, and the map reports zero dead functions out of 156.** The analysis retains
+almost no discriminating power there.
+
+**Still NOT fixing it, and the precondition is worth restating** because `?` and `Drop` closing
+makes it tempting: the recorded constraint is not only those two. Format-args and `for`-loop
+resolution still cover only concrete-`Adt` types — `.to_string()`, `dyn Trait` format args, and
+generics remain uncovered — and narrowing roots before those close would manufacture false dead
+code. The measurement above raises the PRIORITY of closing them; it does not license tightening
+roots early.
+
+## Family A, working on a real Bevy project
+
+    dynamic edges 48   static edges 89
+    <StrategicPlugin as Plugin>::build -> setup_strategic_camera
+    <GamePlugin as Plugin>::build     -> initialize_strategic_map
+
+That is `app.add_systems(Update, setup_strategic_camera)` — the system passed as a VALUE, never
+called syntactically. Bevy is built entirely this way, so without family A every system function in
+the project would have had no incoming edge.
+
+Honest sizing: only **4** functions would actually flip to unreachable without the dynamic edges,
+because 87% of the crate is already a root (see above). The family is doing real work; the
+over-rooting is masking how much.
