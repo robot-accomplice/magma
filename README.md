@@ -197,7 +197,7 @@ which re-runs the CI gates, verifies the tag matches the binary's version, cross
 target (magma is pure Go), and publishes a checksummed GitHub Release.
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 ## License
