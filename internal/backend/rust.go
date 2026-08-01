@@ -357,7 +357,10 @@ type helperResult struct {
 }
 
 func (s helperSignature) toContract() *contract.Signature {
-	out := &contract.Signature{}
+	// Non-nil slices, matching golang.go's signatureOf. contract.Signature's
+	// MarshalJSON also guarantees this on the wire; doing it here as well keeps
+	// the in-memory value correct for anything reading the struct directly.
+	out := &contract.Signature{Params: []contract.Param{}, Results: []contract.Result{}}
 	for _, p := range s.Params {
 		name := ""
 		if p.Name != nil {
