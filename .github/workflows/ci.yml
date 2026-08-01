@@ -78,13 +78,17 @@ jobs:
       # `sysroot = Some(RustLibSource::Discover)`, one of the five load-config
       # facts the handover marks as load-bearing, and discovery needs the
       # sysroot sources present. Without it every fixture refuses.
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to an immutable commit SHA, not the mutable `@stable` tag: a tag
+      # can be repointed by whoever controls the action, and this job runs with
+      # repository credentials. Flagged by SonarCloud (githubactions:S7637) on
+      # this workflow's first analysis.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy, rust-src
 
       # The ra_ap_* dependency tree is very large and pinned at =0.0.343, so a
       # cold build dominates this job. The pin makes the cache key stable.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: rust-helper
 
@@ -99,13 +103,18 @@ jobs:
       # silently tolerates everything, including the next lint nobody meant to
       # add.
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
+      # --locked on every dependency-resolving step: without it cargo may UPDATE
+      # Cargo.lock rather than fail, so CI could silently build against different
+      # versions than the committed lock. That matters more here than usual — the
+      # `ra_ap_* = 0.0.343` pin is load-bearing, those crates break across patch
+      # releases. Flagged by SonarCloud (githubactions:S8549).
       - name: build
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: cargo test
-        run: cargo test --release
+        run: cargo test --locked --release
 
       # The real gate. Every fixture is compared against rustc's own dead_code
       # lint in both configs, and its FATAL set must match its committed
