@@ -110,11 +110,28 @@ computability. Every row is a **candidate**, not a verdict: reflection, `encodin
 interfaces, cgo, `go:linkname`, and entry points invoked from outside the repo all produce
 callers static analysis cannot see. A candidate that survives those rules is worth reading.
 
-`fidelity: "rta"` names what an edge *means*: static calls are exact; dynamic
-(interface / function-value) calls are the Rapid Type Analysis over-approximation. Calls
-routed through closures or synthetic wrappers are not yet emitted as node edges — a known,
-labeled v1 limitation, not a silent gap. (This field lives in the JSON for tooling; the
-terminal panel and the notes don't repeat it in jargon a human has to look up.)
+### `fidelity` — what an edge means
+
+Every artifact carries `fidelity`, naming what an edge means for the backend that produced it.
+This is the published vocabulary:
+
+| value | backend | meaning |
+|---|---|---|
+| `rta` | Go | Static calls exact; dynamic (interface / function-value) calls are the Rapid Type Analysis over-approximation. Calls routed through closures or synthetic wrappers are not yet emitted as node edges — a known, labeled limitation, not a silent gap. |
+| `semantic` | Rust | Edges come from rust-analyzer's name resolution and type inference, so a resolved call lands on the impl rustc would select. Desugared forms (operators, `for`, `await`, format args, `?`, `Drop`) resolve from types rather than syntax and are emitted `dynamic` — real over-approximations, never invented edges. |
+
+**Both are real call graphs.** Both over-approximate dynamic dispatch and never invent an edge, so
+every imprecision fails toward "live": a node either map calls dead is dead conservatively.
+
+**The value is an OPEN set, not a closed enum.** magma adds a language per minor release and each
+may name its own fidelity. A consumer that branches on this field must therefore handle an
+unrecognised value explicitly — **do not silently fall back to a weakest-case bar**, which is
+wrong in the safe direction and therefore invisible. A downstream gate did exactly that and spent
+a full sweep treating a genuine call graph as "a guess with no call graph". Announce the unknown
+value instead.
+
+(The field lives in the JSON for tooling; the terminal panel and the notes don't repeat it in
+jargon a human has to look up.)
 
 Regenerating a map **reconciles** the notes: any markdown file the previous run wrote that
 the new render no longer lists (a function that was deleted, say) is removed. A note you
