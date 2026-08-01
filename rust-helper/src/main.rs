@@ -1,5 +1,11 @@
-// Spike: Semantics-based edge extraction with macro descent.
-// Compares against outgoing_calls. usage: helper <root> [--outgoing]
+//! magma's Rust backend helper: extracts a call graph from a Cargo workspace
+//! via rust-analyzer and emits it as `magma-rust-helper/1` JSON on stdout.
+//!
+//! usage: magma-rust-helper <workspace-root>
+//!
+//! stdout carries the JSON contract and NOTHING else — progress and timings go
+//! to stderr behind a `PROGRESS `/`TIMING ` prefix. Invoked by magma's Rust
+//! backend (internal/backend/rust.go), which finds it on PATH.
 mod enumerate;
 mod model;
 mod roots;
@@ -10,19 +16,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use ra_ap_cfg::{CfgAtom, CfgDiff};
-use ra_ap_hir::{HasSource, Semantics};
-use ra_ap_ide::{
-    AnalysisHost, AssistResolveStrategy, CallHierarchyConfig, DiagnosticsConfig, FilePosition,
-    Severity,
-};
-use ra_ap_ide_db::ra_fixture::RaFixtureConfig;
-use ra_ap_ide_db::RootDatabase;
+use ra_ap_hir::Semantics;
+use ra_ap_ide::{AnalysisHost, AssistResolveStrategy, DiagnosticsConfig, Severity};
 use ra_ap_intern::sym;
 use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
 use ra_ap_paths::{AbsPath, AbsPathBuf};
 use ra_ap_project_model::{CargoConfig, CfgOverrides, RustLibSource};
-use ra_ap_syntax::ast::HasName;
-use ra_ap_syntax::AstNode;
 use ra_ap_vfs::{FileId, Vfs};
 
 /// Exit codes. Deliberately mirrored on Go's convention rather than the
@@ -36,7 +35,6 @@ use ra_ap_vfs::{FileId, Vfs};
 const EXIT_USAGE: i32 = 2;
 
 fn main() -> anyhow::Result<()> {
-    let use_outgoing = std::env::args().any(|a| a == "--outgoing");
     let t0 = Instant::now();
 
     // Contract defect 2 (missing argument): previously `.expect(..)`, which
@@ -45,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     // panic is not that. Nothing has executed yet at this point, so
     // `executed_target_code` is honestly `false`.
     let Some(root) = std::env::args().nth(1) else {
-        let r = model::Refusal::new(false, "usage: helper <workspace-root> [--outgoing]");
+        let r = model::Refusal::new(false, "usage: magma-rust-helper <workspace-root>");
         println!("{}", serde_json::to_string_pretty(&r)?);
         std::process::exit(EXIT_USAGE);
     };
@@ -97,15 +95,6 @@ fn main() -> anyhow::Result<()> {
     // `<root>/target`, so a `CARGO_TARGET_DIR` override or a `target-dir`
     // setting in `.cargo/config.toml` is still honoured correctly.
     let target_dir_abs = discover_target_dir(&root_abs)?;
-
-    if use_outgoing {
-        // Debug/comparison mode only (never emits Output; not part of the
-        // JSON contract, not exercised by the oracle harness) — kept as the
-        // single, permanently cfg(test)-on load it always was. Family E's
-        // fix below is scoped to the real Output path.
-        run_outgoing_mode(&root, &root_abs, &target_dir_abs, &load_config)?;
-        return Ok(());
-    }
 
     // Family E fix: TWO workspace loads, merged into one graph, instead of
     // one load with cfg(test) forced on globally and permanently. A single
@@ -628,74 +617,6 @@ fn remap_and_aggregate(
     }
 }
 
-/// The pre-Family-E `--outgoing` debug/comparison mode: a single load, cfg(test)
-/// forced on, printing raw `EDGE` lines via `Analysis::outgoing_calls` instead
-/// of the JSON `Output` contract. Never emits `Output`/`functions`, not part
-/// of the wire contract, not exercised by the oracle harness — kept
-/// unchanged (still one config, not two) since Family E's fix is scoped to
-/// the real Output path this function does not touch.
-fn run_outgoing_mode(
-    root: &str,
-    root_abs: &AbsPathBuf,
-    target_dir_abs: &AbsPathBuf,
-    load_config: &LoadCargoConfig,
-) -> anyhow::Result<()> {
-    // Initializer form, same reason as `analyze_one_config`.
-    let cargo_config = CargoConfig {
-        sysroot: Some(RustLibSource::Discover),
-        cfg_overrides: CfgOverrides {
-            global: CfgDiff::new(vec![CfgAtom::Flag(sym::test.clone())], Vec::new()),
-            selective: Default::default(),
-        },
-        ..CargoConfig::default()
-    };
-
-    let (db, vfs, _p) =
-        match load_workspace_at(Path::new(root), &cargo_config, load_config, &|_s| {}) {
-            Ok(v) => v,
-            Err(e) => {
-                let r =
-                    model::Refusal::new(false, format!("not a computable cargo workspace: {e:#}"));
-                println!("{}", serde_json::to_string_pretty(&r)?);
-                std::process::exit(0);
-            }
-        };
-
-    let host = AnalysisHost::with_database(db);
-    let analysis = host.analysis();
-    let db = host.raw_database();
-
-    let funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
-        let sema = Semantics::new(db);
-        let mut funcs = enumerate::collect(
-            db,
-            &sema,
-            &vfs,
-            root_abs.as_path(),
-            target_dir_abs.as_path(),
-        );
-        roots::mark(db, &mut funcs);
-        funcs
-    });
-
-    let cfg = CallHierarchyConfig {
-        exclude_tests: false,
-        ra_fixture: RaFixtureConfig::default(),
-    };
-    let mut edges = 0usize;
-    for (mf, f) in &funcs {
-        let Some(pos) = pos_of(db, *f) else { continue };
-        if let Ok(Some(items)) = analysis.outgoing_calls(&cfg, pos) {
-            for it in &items {
-                println!("EDGE\t{}\t{}", mf.symbol, it.target.name);
-            }
-            edges += items.len();
-        }
-    }
-    eprintln!("MODE outgoing_calls ({edges} edges)");
-    Ok(())
-}
-
 /// Prefix marking a line on stderr as live progress rather than a diagnostic.
 /// Machine-readable on purpose: `internal/backend/rust.go` matches it to decide
 /// what to surface, so unprefixed stderr (cargo noise, build-script output)
@@ -719,7 +640,12 @@ fn discover_target_dir(root_abs: &AbsPathBuf) -> anyhow::Result<AbsPathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version=1"])
         .current_dir(root_abs.as_path())
-        .output()?;
+        .output()
+        // Bare io::Error here reads as "No such file or directory (os error 2)"
+        // with no hint that CARGO is what is missing — seen for real when the
+        // helper was on PATH but cargo was not, which is an ordinary state for
+        // a daemon or GUI-launched process with a stripped environment.
+        .map_err(|e| anyhow::anyhow!("cannot run `cargo` (is it on PATH?): {e}"))?;
     if !output.status.success() {
         anyhow::bail!(
             "cargo metadata failed while resolving the workspace's target directory: {}",
@@ -840,14 +766,6 @@ fn workspace_type_errors(
     }
     bad_files.sort();
     Ok(bad_files)
-}
-
-fn pos_of(db: &RootDatabase, f: ra_ap_hir::Function) -> Option<FilePosition> {
-    let src = f.source(db)?;
-    let name = src.value.name()?;
-    let offset = name.syntax().text_range().start();
-    let file_id = src.file_id.file_id()?.file_id(db);
-    Some(FilePosition { file_id, offset })
 }
 
 #[cfg(test)]

@@ -88,7 +88,7 @@ set -euo pipefail
 
 REPO="${1:?usage: oracle-diff.sh <workspace-root>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HELPER="$(cd "$SCRIPT_DIR/.." && pwd)/target/release/magma-rust-helper-spike"
+HELPER="$(cd "$SCRIPT_DIR/.." && pwd)/target/release/magma-rust-helper"
 REPO_ABS="$(cd "$REPO" && pwd)"
 
 if [[ ! -x "$HELPER" ]]; then
