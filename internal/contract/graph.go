@@ -215,6 +215,7 @@ const noProdMain = "no production main in scope; reachability not computable"
 // definition; generated code is intentionally not hand-audited for deadness).
 func (g Graph) DeadView(m Meta) Note {
 	m.Fidelity = g.Fidelity
+	m.Limitations = g.Limitations
 	if !g.Computable {
 		return m.Refused(g.NotComputableReason)
 	}
@@ -238,6 +239,7 @@ func (g Graph) DeadView(m Meta) Note {
 // no-production-main scope for the same reason as DeadView.
 func (g Graph) TestOnlyView(m Meta) Note {
 	m.Fidelity = g.Fidelity
+	m.Limitations = g.Limitations
 	if !g.Computable {
 		return m.Refused(g.NotComputableReason)
 	}

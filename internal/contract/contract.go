@@ -39,7 +39,13 @@ type Note struct {
 	Fidelity               string `json:"fidelity"`
 	ReachabilityComputable bool   `json:"reachability_computable"`
 	NotComputableReason    string `json:"not_computable_reason,omitempty"`
-	Rows                   []Row  `json:"rows"`
+	// Limitations rides on every note, including a refused one. The audit gate
+	// weights a candidate by how far to trust the map, and a limitation that
+	// suppresses findings has to travel with the ROWS rather than only with the
+	// graph the rows were derived from — a consumer reading _dead.json may never
+	// open graph.json.
+	Limitations Limitations `json:"limitations"`
+	Rows        []Row       `json:"rows"`
 }
 
 // Meta is the provenance every Note in a run shares: it is stamped once by the
@@ -50,6 +56,10 @@ type Meta struct {
 	Tree       string // SHA, or SHA+"-dirty" when the working tree is dirty
 	CommitDate string // ISO-8601 commit date of HEAD (e.g. 2026-07-24T14:06:00-04:00), deterministic for a SHA
 	Fidelity   string // per-language meaning of "dead" (backend-supplied)
+	// Limitations is set by the view derivation from the graph, not by the
+	// runner — like Fidelity, it is a backend fact that reaches a Note only by
+	// travelling through the graph the note is derived from.
+	Limitations Limitations
 }
 
 // Computed builds a note whose analysis succeeded. Rows are sorted for a stable,
@@ -74,6 +84,7 @@ func (m Meta) Computed(rows []Row) Note {
 		Tree:                   m.Tree,
 		Fidelity:               m.Fidelity,
 		ReachabilityComputable: true,
+		Limitations:            m.Limitations,
 		Rows:                   rows,
 	}
 }
@@ -90,6 +101,7 @@ func (m Meta) Refused(reason string) Note {
 		Fidelity:               m.Fidelity,
 		ReachabilityComputable: false,
 		NotComputableReason:    reason,
+		Limitations:            m.Limitations,
 		Rows:                   nil,
 	}
 }
