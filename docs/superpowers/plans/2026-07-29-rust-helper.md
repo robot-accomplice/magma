@@ -130,10 +130,20 @@ The walker returns `Vec<ra_ap_hir::Function>`; map each through `index`, skippin
 cd rust-helper && cargo build --release
 ./target/release/magma-rust-helper-spike testdata/fixture | jq '{v: .contract_version, fns: (.functions|length), calls: (.calls|length)}'
 ```
-Expected: `contract_version` `"magma-rust-helper/1"`, 11 functions, 8 calls.
+Expected: `contract_version` `"magma-rust-helper/1"`, 11 functions, **7** calls.
+
+> **Why 7 and not 8** (corrected after Task 1 ran; the original estimate came from the
+> pre-ID name-based spike output, which was counting an edge that does not survive
+> id-resolution). The fixture's `t.speak()` goes through a `dyn Speak` receiver, and
+> `sema.resolve_method_call` resolves it to the **trait's declared function**
+> (`Speak::speak`), not to `Dog::speak`. Trait declarations are not enumerated — only impl
+> methods and free functions are — so that target is absent from the id index and the edge
+> is dropped. **This is a real false-dead-code bug**, now confirmed rather than suspected,
+> and Task 6 fixes it. Do not "fix" it here by enumerating trait declarations: that would
+> create edges to a declaration that has no body, which is not what the graph means.
 
 ```bash
-./target/release/magma-rust-helper-spike testdata/fixture | jq -e '.calls | length == 8' && echo OK
+./target/release/magma-rust-helper-spike testdata/fixture | jq -e '.calls | length == 7' && echo OK
 ```
 Expected: `OK`.
 
@@ -725,9 +735,20 @@ also refuse most of the Rust ecosystem."
 
 ---
 
-### Task 6: `dyn` dispatch across multiple impls — the open correctness question
+### Task 6: `dyn` dispatch — fix the confirmed false-dead-code bug
 
-The existing fixture has ONE impl of its trait, so it cannot tell us what happens when several types implement a trait and the call goes through `dyn`. If resolution picks a single impl, the others' methods are unreachable in our graph → **false dead code**, the same class of bug as the macro defect.
+**No longer an open question — Task 1 answered it.** With stable ids in place, the behaviour is
+observable and confirmed: `sema.resolve_method_call` on a `dyn Trait` receiver resolves to the
+**trait's declared function**, not to any impl (verified via `AsAssocItem::container` →
+`AssocItemContainer::Trait(_)`). Trait declarations are not enumerated, so the target is absent
+from the id index and **the edge is dropped entirely**.
+
+Consequence, and why this is Critical rather than cosmetic: a `dyn`-dispatched method has **no
+incoming edge**, so every impl reachable only through `dyn` is reported unreachable — **false dead
+code**, the exact failure magma exists to prevent, and the same class as the macro defect. The
+oracle disagrees: `cargo check` on the multi-impl fixture reports nothing dead.
+
+This task builds the fixture that makes the fix testable, then fixes it.
 
 **Files:**
 - Create: `rust-helper/testdata/multi_impl/`
@@ -782,13 +803,52 @@ jq '[.calls[] | {from, to, kind}]' /tmp/mi.json
 
 Now compute, by hand from the ids, whether **both** `speak` impls are reachable from `main`. The two `speak` functions have distinct ids (Task 1) — that is precisely why ids were required.
 
-- [ ] **Step 4: Act on the finding**
+- [ ] **Step 4: Fix by over-approximating, mirroring Go's RTA**
 
-**If both impls are reachable from `main`:** resolution over-approximates (like Go's RTA) and is safe. Mark those edges `"dynamic"` in `walk.rs` by detecting a `dyn` receiver, and record the finding in the spec.
+Confirmed diagnosis (from Task 1): the call resolves to the trait's declared function, which is not
+enumerated, so the edge vanishes. The fix is to **over-approximate deliberately** — the same choice
+Go makes, and the safe direction: extra edges under-report dead code, missing edges invent it.
 
-**If only one impl is reachable:** this is a false-dead-code bug and MUST be fixed before parity. The fix is to over-approximate deliberately, mirroring Go's RTA: when a method call resolves through a trait, emit an edge to **every** impl of that trait method in the workspace. Look for the impl set via `ra_ap_hir` (grep the vendored source for an impls-of-trait query, e.g. `Impl::all_for_trait`); emit each as a `"dynamic"` edge.
+In `walk.rs`, when `resolve_method_call` returns a function whose container is a trait
+(`AsAssocItem::container(db)` → `AssocItemContainer::Trait(t)`), do not emit an edge to the
+declaration. Instead emit one `"dynamic"` edge to **every impl of that trait method in the
+workspace**. Find the impl set via `ra_ap_hir` — grep the vendored source at
+`~/.cargo/registry/src/*/ra_ap_hir-0.0.343/src/lib.rs` for an impls-for-trait query (candidates:
+`Impl::all_for_trait`, `Impl::all_for_type`); confirm the real name before using it rather than
+guessing.
 
-Either way, add a regression test asserting `cat_target` is reachable from `main`, with a comment stating **why**: rustc considers it live, so a graph that calls it dead diverges from the oracle and reports false dead code.
+Note this is precisely why edges carry `kind` (Task 4): these are genuinely dynamic dispatches, and
+`"dynamic"` labels them as the over-approximation they are — matching Go's `fidelity: "rta"`
+treatment of interface calls.
+
+- [ ] **Step 5: Verify against the oracle**
+
+```bash
+cd rust-helper && cargo build --release
+./target/release/magma-rust-helper-spike testdata/multi_impl > /tmp/mi.json
+jq '[.calls[] | select(.kind=="dynamic")] | length' /tmp/mi.json
+```
+Expected: at least 2 — one edge per impl of `Speak::speak`.
+
+Then confirm both impls are reachable from `main`, which is the property that matters:
+
+```bash
+jq -r '. as $g | [$g.functions[] | select(.symbol=="main") | .id][0] as $m
+  | [$g.calls[] | select(.from==$m) | .to] as $direct
+  | [$g.functions[] | select(.id as $i | any($direct[]; .==$i)) | .symbol]' /tmp/mi.json
+```
+Expected: includes **both** `speak` impls (two entries), not one.
+
+Also re-check the original fixture now emits 8 calls (the dyn edge is restored):
+
+```bash
+./target/release/magma-rust-helper-spike testdata/fixture | jq '.calls | length'
+```
+Expected: `8`.
+
+Add a regression test asserting `cat_target` is reachable from `main`, with a comment stating
+**why**: rustc considers it live, so a graph that calls it dead diverges from the oracle and
+reports false dead code.
 
 - [ ] **Step 5: Commit**
 
@@ -999,3 +1059,492 @@ git commit -m "test(rust-helper): oracle diff harness + recorded parity results"
 **3. Type consistency.** `model::Function` grows in Tasks 1→2→3 and is referenced by that name throughout; `model::Call` grows in 1→4. `enumerate::collect` returns `Vec<(model::Function, ra_ap_hir::Function)>`, which `roots::mark` mutates and `walk::edges` consumes — consistent across Tasks 2, 4, 5. `CONTRACT_VERSION` is defined once in Task 1 and reused by `Refusal` in Task 7.
 
 **One known risk, stated rather than hidden:** exact `ra_ap_*` method names (`self_param`, `visibility`, `params_without_self`, `ret_type`, `docs`, `line_index`, `file_path`, `path_to_root`, `DisplayTarget`) are written from the 0.0.343 source but were not all compiled during planning. Tasks 2 and 3 carry an explicit instruction to grep the vendored source rather than guess or silently drop a field. This is the API-churn cost the operator accepted.
+
+---
+
+### Task 9: Enumerate trait *declaration* methods (false dead code)
+
+**Found during Task 5's fix loop; routed here because it is an enumeration defect, not a
+root-flagging one.** `enumerate::collect` walks only `Module::declarations` (free functions) and
+`Module::impl_defs` (impl methods). A trait's own declared methods are never enumerated, so a
+default-bodied trait method is invisible — **and so are its outgoing calls**.
+
+Reproduced against the oracle:
+
+```rust
+pub trait Tr { fn m(&self) { helper(); } }
+fn helper() {}
+```
+`cargo check` emits **zero** warnings — rustc treats `helper` as live via `Tr::m`'s default body.
+The helper emits `helper` with no incoming edge and **zero** calls: `Tr::m` was never enumerated,
+so the `Tr::m → helper` edge does not exist. Direction: **false dead code**.
+
+**Files:** `rust-helper/src/enumerate.rs`; new fixture `rust-helper/testdata/traitdecl/`.
+
+Enumerate trait-declaration methods alongside impl methods. Grep the vendored source for the
+trait's associated-items query (candidate: `Trait::items(db)` → `AssocItem::Function`) before
+using it. Two things must both hold: the method appears as a node, and the body walker reaches its
+default body so the outgoing edge is emitted.
+
+Verification: the fixture above must yield an edge `Tr::m → helper`, and `helper` must not be
+reported dead. Also confirm a trait method with **no** default body (`fn m(&self);`) is handled
+sensibly — it has no body, so it emits no edges, and marking it a node with zero outgoing edges is
+correct rather than a bug.
+
+### Task 10: Trait impls on non-`Adt` self types (false dead code)
+
+**Found during Task 5's fix loop, outside that task's required matrix.** `is_public_method`
+requires `imp.self_ty(db).as_adt()` to succeed, which returns `None` for builtins, tuples, and
+references. The `all_ancestors_public` fallback then requires `f.visibility(db) == Visibility::Public`,
+which — per Task 5's root-cause finding — a trait-impl method can **never** satisfy.
+
+Reproduced against the oracle:
+
+```rust
+pub trait Tr2 { fn m2(&self); }
+impl Tr2 for i32 { fn m2(&self) {} }
+```
+`cargo check` emits zero warnings (a public trait's impl is public API regardless of self-type
+shape); the helper reports `m2` → `root: false`. Direction: **false dead code**.
+
+**Files:** `rust-helper/src/roots.rs`; extend `rust-helper/testdata/libonly/`.
+
+For a **trait** impl, the self type's shape should not gate root status at all — if the trait is
+publicly reachable and the impl exists in this workspace, the method is public API. Note the
+orphan rule means a non-`Adt` self type can only appear in a trait impl, so this is precisely the
+case where the `as_adt()` requirement is wrong.
+
+Verification: `impl Tr2 for i32` → `m2` **root: true** (oracle silent); a private trait's impl on
+`i32` → **root: false** (oracle warns); and Task 5's full 7-case matrix must still pass unchanged.
+
+### Task 11: Enumerate `include!`-generated code (false dead code)
+
+**Found during Task 7's review; pre-existing, reproduced at base commit `2ad40ed` as well.**
+`enumerate::push` drops any function whose source resolves through macro expansion:
+
+```rust
+let Some(efid) = src.file_id.file_id() else { return };
+```
+
+`include!` is handled internally as a macro call, so `include!(concat!(env!("OUT_DIR"), "/generated.rs"))`
+— **the standard build-script codegen pattern** — never produces a node. `walk::edges` iterates only
+enumerated functions, so the generated function's outgoing calls are never walked either.
+
+Reproduced against the oracle: a `build.rs` emitting `pub fn generated_fn() { production_callee(); }`,
+`include!`d, with `main()` calling it. `cargo check` is **clean** — rustc sees
+`main → generated_fn → production_callee`. The helper enumerates 3 functions, emits **zero** edges,
+and leaves `production_callee` with no incoming edge. Direction: **false dead code**.
+
+This matters more than a rare edge case: `#[path = ...]` cannot take `concat!(env!(...))`, so
+`include!` is effectively the only mechanism for `OUT_DIR` codegen. magma executes build scripts
+*specifically* to make generated code visible (§Security in the spec) — this gate discards it.
+
+**Files:** `rust-helper/src/enumerate.rs`, `rust-helper/src/walk.rs`; new fixture
+`rust-helper/testdata/buildgen/` with a real `build.rs`.
+
+Teach enumeration to accept macro-expanded function definitions as real nodes and walk their
+bodies. Constraints that must not break: macro **descent** in `walk.rs` stays intact (Task 4/6),
+`outgoing_calls` never becomes the default, and the `generated` flag (Task 7) must be `true` for
+these nodes so magma's views can exclude them the way Go excludes cgo output.
+
+Verification: the fixture must emit an edge `generated_fn → production_callee`, `production_callee`
+must not be reported dead, and the generated node must carry `generated: true`. `testdata/fixture`
+(11 fns / 8 calls), `multi_impl`, and `libonly` must all be unchanged.
+
+### Task 12: Resolve calls nested in macro *arguments* (false dead code)
+
+**Found during Task 8's re-review; pre-existing, and out of that task's harness-only scope.**
+The walker descends into macro *expansions* (Task 4/6), but a call written as a macro **argument**
+yields no edge:
+
+```rust
+println!("{}", foo());   // -> ZERO edges to foo
+```
+
+Confirmed with a trivial repro independent of any test-module context. Moving the call to its own
+statement before the `println!` resolves normally, which isolates the gap to argument position.
+
+Direction: **false dead code** — `foo` gets no incoming edge and is reported dead while rustc
+considers it live. This matters because calls inside macro arguments are pervasive: `println!`,
+`format!`, `assert_eq!`, `vec!`, `write!`, and every logging macro.
+
+**Files:** `rust-helper/src/walk.rs`; new fixture `rust-helper/testdata/macroarg/`.
+
+The unexpanded AST holds the macro's arguments as a token tree rather than parsed expressions, so
+`ast::CallExpr::cast` never matches them. Investigate whether descending into the expansion
+surfaces the argument call (it should — the expansion contains the call), and if the current
+descent is missing it, why: candidate causes are `expand_macro_call` returning a node whose
+argument sub-expressions do not map back through `Semantics` resolution, or the resolution being
+attempted against the unexpanded token rather than the expanded one. Grep the vendored source for
+`descend_into_macros*` variants — one of them may be the intended tool for exactly this mapping.
+
+Verification: the fixture must emit an edge to `foo` from a function containing
+`println!("{}", foo())`, and `foo` must not be reported dead. Existing fixtures unchanged
+(`fixture` 11 fns / 8 calls, `multi_impl`, `libonly`), and the oracle harness must stay FATAL=0.
+
+### Task 13: Make the harness's cascade exclusion collision-proof
+
+**Found during Task 9's re-review; pre-existing, and a defect in the measuring instrument
+itself.** The shipped impl-cascade exclusion keys on the **bare trait/type name** captured from
+rustc's diagnostic text (`oracle-diff.sh:158,163`). Names are not unique within a crate.
+
+Demonstrated with a probe containing both a dead `Amb` and a live `Amb`:
+
+```
+line 2: trait `Amb` is never used          <- dead_side::Amb
+line 9: method `never_used` is never used  <- live_side::Amb (rustc spoke per-method)
+```
+
+A name-keyed gate treats `dead_traits = ["Amb"]` as covering **`live_side::Amb`'s methods too** —
+including ones rustc considers live. That is the same divergence-hiding slot Task 9's reverted
+exclusion occupied; the shipped impl version is only narrowed by requiring trait *and* type to
+collide together, which makes it rarer, not sound.
+
+**The sound gate:** the `(file, line)` of the enclosing trait/impl declaration, matched against
+the primary span of the `... is never used` diagnostic. rustc supplies both, and they cannot
+collide.
+
+**Cheapest correct route — and it deletes code rather than adding it.** The harness currently
+cannot build that key because `helper.json` carries only `kind: "func"|"method"` with no
+container. Have `enumerate.rs` emit the enclosing container's `(file, line)` as a field: it
+already holds `db` and the `ra_ap_hir::Function`, and `as_assoc_item(db).container(db)` plus
+`HasSource` yields it directly. With that field present the harness can drop its source-scanning
+brace matcher entirely — removing both the brace-matching hazard and its O(methods × filesize)
+subprocess cost.
+
+**Files:** `rust-helper/src/enumerate.rs`, `rust-helper/src/model.rs`,
+`rust-helper/scripts/oracle-diff.sh`, `rust-helper/scripts/oracle-diff.jq`.
+
+Verification: the dead-`Amb`/live-`Amb` probe must NOT exclude `live_side::Amb`'s methods; the
+existing cascade behaviour on `libonly` must be unchanged; all fixtures keep their current
+FATAL counts (`libonly`'s one honest FATAL may legitimately become excluded once the gate is
+sound — if so, say which and why).
+
+> **Scoping correction for Task 13, found during Task 10's review — read before starting.**
+> The `(file, line)` keying above fixes **collision soundness** only. It does **not** close the
+> gap Task 10 surfaced: a builtin self type such as `i32` never receives its own `dead_code`
+> diagnostic, however precisely the enclosing trait is keyed, so the "trait AND self type both
+> independently dead" test can never be satisfied for it. Closing that requires an **additional**
+> criterion:
+>
+> *trait independently reported dead AND (self type independently reported dead **OR** the self
+> type is not a locally-defined item eligible for its own diagnostic).*
+>
+> Without this, Task 13 will ship believing it closed a gap it only half-closed, and `libonly`'s
+> two `priv_m` FATALs will remain. Two independent tasks (9 and 10) have now hit this mechanism
+> from different angles, which is the argument for prioritising it.
+
+> **Task 12 — CLOSED by Task 11, and its premise was wrong.** Verified by A/B reproduction at
+> Task 11's HEAD: `println!("{}", foo())` now emits `main → foo`; with Task 11's
+> `sysroot = Some(RustLibSource::Discover)` disabled and rebuilt, it emits zero edges —
+> exactly the defect this task was filed for.
+>
+> **Argument position was never the cause.** A call passed to a *local* `macro_rules!` macro
+> resolved correctly even with the sysroot disabled. The real mechanism is that `println!`,
+> `format!`, `write!`, `vec!`, `assert!`, `matches!` and friends are `macro_rules!` items defined
+> in std/core, and `Semantics::expand_macro_call` cannot expand a macro it cannot resolve. So
+> **any** call reachable only through a std macro — in any position — was silently invisible,
+> despite the macro-descent logic from Tasks 4 and 6 being present and correct.
+>
+> **Consequence for this plan's earlier evidence:** every fixture count and the roboticus-rust
+> real-workspace run (8,437 functions / 12,352 edges) predate the sysroot fix and were therefore
+> taken under a helper blind to all std-macro-mediated calls. Treat them as stale and re-measure
+> before citing them as parity evidence.
+
+### Task 14: Reduce the sysroot load cost
+
+Task 11's `sysroot = Some(RustLibSource::Discover)` fix is mandatory for correctness (+64% edges),
+but it added **80.1s** to every run — up from 1.8s, a 44× increase and now the single largest
+cost. Critically it is **fixed overhead**: independent of repo size, so it hurts small repos
+proportionally worse than the 575k-line workspace it was measured on.
+
+**Files:** `rust-helper/src/main.rs` (the `CargoConfig` construction), possibly `src/load.rs`.
+
+Investigate, in rough order of likely payoff:
+
+1. **Is it re-loaded per run when it need not be?** rust-analyzer caches sysroot metadata in its
+   own workflows; check whether `RustLibSource::Discover` re-discovers and re-parses std/core/alloc
+   every invocation, and whether a path-pinned variant (`RustLibSource::Path`) skips discovery.
+2. **Is the whole sysroot needed?** magma only resolves *macros* from std/core — it never
+   enumerates std functions (the `CrateOrigin::Local` filter discards them immediately). If
+   sysroot loading can be limited to what macro resolution requires, most of the cost may be
+   avoidable.
+3. **Can it be cached across runs?** magma already has a freshness mechanism; a sysroot fingerprint
+   (toolchain version + path) is stable across repos, so a cache would amortise across every
+   invocation on a machine, not just re-runs of one repo.
+
+Grep the vendored source for `RustLibSource`, `SysrootQueryMetadata`, and the sysroot loading path
+in `ra_ap_project_model-0.0.343` before choosing an approach — confirm real names, do not guess.
+
+**Verification:** correctness must not regress — roboticus-rust must still yield **10,651
+functions / 20,268 edges**, and all fixtures keep their current counts and FATAL status. Report
+the new load time and total against the 80.1s / 312.5s baseline. If the cost is irreducible, say
+so with evidence; that is a legitimate outcome and better than a fragile optimisation.
+
+### Task 15: Emit `executed_target_code`
+
+One boolean, decided in the spec (§DECIDED). The helper is where the fact is known — it is the
+process that runs build scripts and proc macros — so it emits it and magma's Go side passes it
+through rather than re-deriving it.
+
+**Files:** `rust-helper/src/model.rs`, `rust-helper/src/main.rs`.
+
+Add `executed_target_code: bool` to `Output` (and to `Refusal`, where it is always `false` — a
+refusal means nothing ran). For `Output` it is `true` whenever the workspace loaded with
+`load_out_dirs_from_check: true` and the sysroot proc-macro server active, which is the only
+configuration the helper currently uses — so it is `true` in practice, but derive it from the
+actual `LoadCargoConfig` rather than hard-coding it, so it stays honest if a future sandboxed or
+no-execution mode is added.
+
+**Verification:** every fixture's JSON carries `"executed_target_code": true`; a refusal artifact
+(private-items-only crate) carries `false`; no other field changes; all fixtures keep their
+current function/edge counts and FATAL status.
+
+### Task 16: Expected-FATAL baselines, so the harness can gate
+
+**Proposed during Task 13's review; it answers a problem raised two tasks earlier and left open.**
+
+Two fixtures (`libonly`, `collision`) now exit non-zero **by design**, carrying FATALs that are
+honest and adjudicated. That is the correct outcome — suppressing them is the mistake this plan
+has already had to undo twice — but it breaks the harness as a gate: a run that is red for
+adjudicated reasons is indistinguishable from one red for a **new** reason, so the exit code stops
+carrying information and gets ignored. No CI workflow invokes `oracle-diff.sh` today, and it
+cannot be wired up while red is the normal state.
+
+**The fix: make "known and adjudicated" machine-checkable instead of prose.**
+
+- Commit a per-fixture baseline, e.g. `testdata/<crate>/oracle-expected.json`, listing each
+  adjudicated FATAL by `symbol` + `file:line` with a one-line reason (`Task-9 trait-declaration
+  gap`; `rustc attributes the unused-method diagnostic to the trait's method decl`).
+- Have the harness — or a thin runner around it — diff the observed FATAL set against the baseline
+  and exit **0 on exact match**, non-zero on **any** difference.
+- **A disappearing FATAL must also fail.** That is the non-obvious half: a FATAL vanishing usually
+  means an exclusion silently widened, which is exactly the failure mode this plan keeps hitting.
+  An expected-set diff catches it; a threshold or a max-count would not.
+
+Then `exit 0` means *"the instrument behaves as adjudicated"* rather than *"no FATALs"*, every red
+run is real signal, and the fixtures become CI-able.
+
+**Files:** `rust-helper/scripts/oracle-diff.sh` (or a new runner), `rust-helper/testdata/*/oracle-expected.json`, plus a CI workflow entry.
+
+Verification: with baselines committed, all fixtures exit 0. Introduce a deliberate regression
+(e.g. revert one line of a helper fix) and confirm it exits non-zero naming the new FATAL. Delete
+a baseline entry the helper still produces and confirm that also fails. Both directions must fail
+loudly, and adding a baseline entry must require a stated reason.
+
+### Task 17: Column convention mismatch on non-ASCII source lines
+
+**Found during Task 13's re-review. Real, reproducible, and fails safe — but it degrades the
+measuring instrument's precision on any source line containing non-ASCII text.**
+
+Task 13 keys the oracle match on `(file, line, column)`. The two sides disagree on what a column
+is:
+
+- **ra_ap / the helper** emits a **UTF-8 byte** offset (confirmed in `line-index-0.1.2/src/lib.rs`,
+  documented as "Zero-based UTF-8 offset").
+- **rustc** emits a **character** column.
+
+Reproduction (`p_utf8b`): a dead function preceded on its own declaration line by a multi-byte
+comment — `/* 日本語コメント */ fn dead_fn() {}` — gives rustc `col: 22` and the helper `column: 36`.
+The keys never match, so the function surfaces as a **disclosed FATAL** rather than matching the
+oracle's verdict.
+
+**Why this is not urgent but is real:** byte offset is always ≥ character offset, so a mismatch can
+only ever cause a spurious *non*-match — a missed agreement or a missed cascade exclusion. It can
+**never** cause a spurious match, which is what would hide a divergence. The failure direction is
+therefore safe: it produces visible FATALs, never silent exclusions. But every non-ASCII line costs
+the instrument precision, and international codebases will hit it.
+
+**Files:** `rust-helper/src/enumerate.rs` (column computation), possibly `rust-helper/scripts/oracle-diff.jq`.
+
+Convert the byte offset to a character offset before emitting, or normalise both sides to a common
+convention. Grep `line-index` and `ra_ap_ide_db`'s line-index API for a character-column accessor
+before writing a conversion by hand.
+
+Verification: `p_utf8b` must have the helper and rustc columns agree, and the function must match
+the oracle instead of surfacing as a FATAL. All existing fixtures (ASCII-only) must be unchanged —
+`collision` 3/1, `libonly` 2/3, and `fixture`/`multi_impl`/`traitdecl`/`buildgen` at 0.
+
+---
+
+# Plan A outcome: DO NOT SHIP. Extraction is unsound on ordinary Rust.
+
+**Recorded 2026-07-30 at `755e0b1`, after the final whole-branch review (three reviewers,
+three lenses). Tasks 1–17 are all complete and the branch's own oracle gate is GREEN — and that
+green is the problem: no fixture exercises the shapes below, so the instrument never saw them.**
+
+The helper does not meet the stated bar ("full parity or don't ship"). This is not a polish gap.
+On a **twelve-line idiomatic program** the helper emits 5 functions and **zero** edges, so magma
+would report 4 dead where rustc reports 1 — three false dead-code rows:
+
+```rust
+fn double(x: i32) -> i32 { x * 2 }          // passed to .map()      -> FALSE DEAD
+fn handler_a() -> i32 { 1 }                  // in a static fn table  -> FALSE DEAD
+const fn init_b_const() -> i32 { 9 }         // called from a static  -> FALSE DEAD
+fn really_dead() -> i32 { 0 }                // genuinely dead        -> correct
+static TABLE: [fn() -> i32; 1] = [handler_a];
+static S: i32 = init_b_const();
+fn main() { vec![1,2,3].into_iter().map(double).collect::<Vec<_>>(); }
+```
+
+A false dead-code row is the worst failure this tool has: it is a deletion order for live code.
+**Containment is the only reason this is not an incident** — verified independently: only
+`detect.Go` is registered (`internal/backend/backend.go`), nothing `exec`s the helper, and a real
+Rust repo still refuses honestly. Nothing consumes any of this yet.
+
+## Confirmed false-dead-code families (each reproduced against rustc, not argued)
+
+| # | Family | Cause | Trigger frequency |
+|---|---|---|---|
+| A | Function used as a **value** — `.map(f)`, `[f]`, `let g = f;`, struct field | `walk.rs:94` casts only `CallExpr` with a `PathExpr` callee | Every higher-order call site |
+| B | **Desugared** calls — `a + b`, `for`, `?`, `await`, `println!("{}", x)`, `Drop` | `walk.rs:88-141` models no desugaring, so operator/format/iterator trait impls get no incoming edge | Universal |
+| C | Calls **outside a function body** — `const`/`static`/assoc-const initializers | `walk.rs:38-50` walks only `f.source(db).value.body()` | Common |
+| D | **Macro depth-8 guard** silently truncates | `walk.rs:85` `if depth > 8 { return; }`, no counter, no disclosure | `serde_json::json!` exhausts it at the **2nd key**; `println!` alone costs 2 |
+| E | **`cfg(test)` forced globally**, so `#[cfg(not(test))]` code is invisible and its callees read dead | `main.rs:31-34`; Go does **two** package loads precisely to avoid this | Any cfg-split codebase |
+| F | Nodes emitted **inside the user's rustup toolchain** | `#[derive(Debug)]` expansion attributed to `core/src/fmt/mod.rs`; `generated:false` | `#[derive(Debug)]` is near-universal |
+
+## Confirmed contract defects (independent of the above)
+
+- **`executed_target_code` is false on its only reachable refusal path.** `load_workspace_at`
+  (`main.rs:49`) runs build scripts and the proc-macro server; the refusal fires at `main.rs:77`
+  and `Refusal::new` hard-codes `false`. The one field whose purpose is to be a trust boundary
+  currently lies. *(Ledger correction: Task 15 recorded hard-coded-`false` as a safety property —
+  "cannot accidentally carry true". That reading was wrong; it is simply incorrect.)*
+- **Two refusal paths emit no machine-readable refusal at all** — `.expect` panics (exit 101),
+  `load_workspace_at(..)?` exits 1. Go guarantees a `computable:false` envelope on every soft
+  refusal. Exit-code convention is also inverted vs Go.
+- **`test` is the `#[test]` attribute only**, so helpers in `#[cfg(test)] mod` and in `tests/`
+  report `test:false`. Worse, `roots.rs:55-58` only exempts `node.test`, so a `#[cfg(test)] pub mod`
+  becomes a **production root** — laundering test code into production and *hiding* real dead code.
+  Go's analogue is the `_test.go` filename, which covers every helper in a test file.
+- **`generated` is `is_macro_origin || path.contains("/target/") || path.contains("/build/")`** —
+  an unanchored substring match. `src/build/mod.rs` and any hand-written `macro_rules!` function are
+  marked generated, and `IsDead()` excludes generated, so this **silently suppresses dead rows**.
+  *(Ledger correction: the deferral note claiming `/build/` "is a subset of `/target/`, adds no
+  coverage" is false — `src/build/mod.rs` matches `/build/` only.)*
+- **Edge `kind:"dynamic"` is CHA in Rust, RTA in Go.** `Impl::all_for_trait` emits an edge to every
+  impl of a trait regardless of instantiation. Same field, same string, materially weaker analysis.
+- **`symbol` is bare, and `(pkg, symbol)` is not unique** — `libonly` ids 14/15 are both
+  `re_m`/`libonly::reexported_trait`. Go's `symbol` carries the receiver type (`T.Method`) precisely
+  to avoid this; Architext slugs would collide into positional `-2`/`-3` suffixes.
+
+## The trap to avoid when fixing family B
+
+Trait impls of non-local traits (`Display`, `Iterator`, `Add`) survive today **only by accident**:
+`roots.rs:184-196` marks them roots when the trait name happens to be `use`d into a publicly
+reachable module. Root status therefore depends on where an unrelated import sits — verified:
+moving `use std::fmt;` from the crate root into a private `error.rs` flips
+`impl fmt::Display for MyErr` to false-dead.
+
+The tempting fix — "treat impls of non-local traits as roots" — turns probe5 green while making
+**every trait impl a permanent root**, so a dead trait impl could never be reported again, and it
+leaves family B's real hole (no desugared edges) both open and untestable. **The fix must be at the
+edge layer in `walk.rs`**: resolve `BinExpr`/`PrefixExpr`/`IndexExpr` → `ops::*`, `ForExpr` →
+`IntoIterator::into_iter`/`Iterator::next`, `TryExpr` → `From::from`, `AwaitExpr` → `Future::poll`,
+format args → `Display::fmt`/`Debug::fmt`, scope exit → `Drop::drop`. Only then can roots be
+tightened to recover reporting power.
+
+## Why the gate stayed green — CORRECTED
+
+**An earlier revision of this section claimed "the harness is sound and honest." That was written
+after two of three reviews and is WRONG. The third review, which attacked the instrument
+specifically, found two critical paths where it reports green having measured nothing.** Both
+reproduced personally:
+
+- **`considered: 0` is reported as success.** `generated` is
+  `is_macro_origin || path.contains("/target/") || path.contains("/build/")` against the
+  **absolute** path (`enumerate.rs:153-156`), and `oracle-diff.jq:79` excludes every generated
+  function from **both** directions. Copying `testdata/fixture` unmodified to `/tmp/build/proj`
+  yields `considered:0, excluded:12 (generated), fatal:0` and prints the FATAL:0 success line.
+  An ordinary `src/build/mod.rs` module does the same thing to a real crate. Nothing guards the
+  `considered` count.
+- **`cargo check`'s exit status is discarded** (`oracle-diff.sh:101-102`, `|| true`). A crate that
+  fails to compile emits zero `dead_code` diagnostics — rustc aborts before the lint pass — so the
+  harness books every function as `agree_live` and exits 0. The freshness guard passes *because*
+  rustc genuinely ran, so it is structurally incapable of catching this. This is the same
+  epistemic hole Task 8 closed for warm caches, reintroduced through a different door.
+  *(I hit this live while writing a probe this session: my crate failed with `E0015`, rustc
+  emitted no `dead_code` output, and I only noticed because I found the empty result suspicious.
+  Through the harness it would have been a silent green.)*
+
+So the honest statement is: **the gate logic (Task 16) is excellent and survived all eight attacks
+on it — set equality, symbol assertion, duplicate-key rejection, mandatory reasons, SUMMARY
+pinning. The oracle *pipeline feeding it* has two critical false-green paths.** Those are separate
+components and the distinction matters when fixing.
+
+Fixture coverage is also a real gap and remains true as written: no `testdata/` crate contains a
+function used as a value, a desugared operator call, a const initializer, a deep macro, a
+`cfg(not(test))` item, or a `derive`. Verified: zero fixtures match.
+
+**The common thread across every false-green: the instrument never checks that the oracle actually
+rendered a verdict.** The freshness guard answers "did rustc run?" — necessary, not sufficient.
+Two more guards are needed: *did it finish?* and *did we compare anything?*
+
+**Therefore the first task of the next phase is fixtures, not fixes.** Add a crate per family
+above, confirm each turns the gate RED with a FATAL that matches the family, and only then fix.
+Otherwise the same green will be re-earned without the defect being gone. This is the pattern that
+already burned this plan three times, at a larger scale.
+
+## Sequencing
+
+1. **Instrument first (H1–H8 above).** No measurement is trustworthy until these close — including
+   "all 7 fixtures pass" and any before/after this phase takes. Start with the `considered == 0`
+   guard and the `cargo check` exit-status check; they are a handful of lines each.
+2. **Fixtures next** — one crate per family A–F; each must turn the gate RED with a FATAL that
+   matches its family. A fixture that does not go red is a decoration, not a test.
+3. Contract defects (cheap, independent): refusal honesty, refusal envelopes, `test`/`root`,
+   `generated`, `symbol` uniqueness. Note `generated` also closes H1 — one root cause, two victims.
+4. Family E (two loads) — matches Go's architecture; roughly doubles a run already at 130–270s
+   on a large workspace. Measure before and after; do not guess.
+5. Families A, C, F — mechanical once located.
+6. Family B (desugaring) — the deepest, and the one that unblocks tightening roots.
+7. Re-baseline `oracle-expected.json` per fixture only after each family is genuinely fixed, and
+   give `collision`'s entry 2 a linked fix task rather than permanent adjudication.
+
+**Do not wire a magma-side Rust backend, and do not change
+`~/.claude/skills/magma/SKILL.md`'s "Rust is in development" line, until A–F are closed.** That
+line is currently accurate and is the thing protecting users.
+
+## Instrument defects (separate component from the gate — fix these FIRST of all)
+
+The gate (Task 16) is sound. The oracle pipeline feeding it is not. Until these are closed, **no
+measurement taken with this harness can be trusted**, including the "all 7 fixtures pass" claim and
+any before/after comparison the next phase makes. This is why they come before even the fixtures.
+
+| # | Defect | Effect |
+|---|---|---|
+| H1 | No guard on `considered == 0` | Instrument compares nothing, reports green. Triggered by any `/build/` or `/target/` path segment, incl. an ordinary `src/build/` module |
+| H2 | `cargo check` exit status discarded (`|| true`) | Non-compiling crate → zero `dead_code` output → every function booked `agree_live`, exit 0 |
+| H3 | Attribute scan matches doc-comment **prose** (`oracle-diff.sh:222,230`) | A doc comment mentioning `#[allow(dead_code)]` in English silently drops the function from both directions |
+| H4 | Oracle scope narrower than enumeration scope | `cargo check --workspace` skips `examples/`, `tests/`, `benches/`; the helper enumerates them → both false FATALs and fake `agree_live`. Freshness guard is package-granular, not target-granular |
+| H5 | **No `cargo check --profile test` run exists at all** | The spec describes a two-config oracle; `grep` finds one invocation. Combined with `test:true` excluded from both directions, the helper's test-code handling is entirely unmeasured — while `reachable` vs `prod_reachable` is a shipped contract concept |
+| H6 | `oracle-diff.sh`'s documented exit-3 refusal path is unreachable | `set -e` kills the script at `:87` on the helper's exit-2 refusal before the `.computable == false` check at `:90`. `oracle-gate.sh`'s dedicated rc-3 branch never fires |
+| H7 | `#![allow(dead_code)]` at crate root undetected | FATAL direction survives (fails safe), but `report_only` collapses and functions are booked `agree_live` — parity evidence manufactured from an oracle told to say nothing. `#[allow(unused)]` also not in the regex list |
+| H8 | `executed_target_code` emitted but never asserted | No script checks it, no baseline pins it. Disabling the proc-macro server would go unnoticed on a real workspace |
+
+**H1 and H2 share a shape with the `generated` contract defect**: one substring heuristic
+(`/build/`, `/target/`) blinds the instrument *and* suppresses user-facing dead rows. Fixing
+`generated` properly closes both. The ledger recorded `/build/` as a deferred cosmetic Minor —
+that assessment was wrong twice over.
+
+## Also unmeasured (no fixture, no probe, anywhere on this branch)
+
+Proc macros and `#[derive]`-generated methods (excluded wholesale as `generated`, so
+`executed_target_code`'s entire subject is untested) · macro-generated trait/type declarations
+feeding the cascade key, whose soundness argument assumes two items cannot share a
+`(file,line,column)` — false once rustc remaps spans to a call site · **multi-crate workspaces**
+(every fixture is a single package, so cross-crate `pub` reachability and the disclosed
+`transitive_rev_deps` gap are untested) · `async fn`, closures, function pointers, generic trait
+objects, `impl Trait` returns · `#[no_mangle]`/`#[used]`/`#[export_name]` (exclusion code exists,
+zero fixture coverage) · non-ASCII **identifiers** (utf8col only covers non-ASCII in a preceding
+comment, so Task 17's column fix has never been tested against Task 13's collision fix).
+
+## One baselined FATAL needs a linked fix task, not permanent adjudication
+
+`testdata/collision/oracle-expected.json` entry 2 (`live_method` @ `src/main.rs:22:12`) is
+accurately reasoned, but what it normalises is a **pervasive real class**: any trait method called
+statically on a concrete type leaves its trait-declaration node with no incoming edge, so a
+consumer sees `Trait::method` as dead. A five-line crate reproduces it with 2 FATALs. Task 9 fixed
+the *dyn* case by emitting a declaration edge; the **static** case was never fixed. Left as-is,
+real workspaces produce this at volume, the set-equality baseline becomes unmaintainable, and that
+creates exactly the pressure to paste reasons that has burned this plan three times.

@@ -25,7 +25,13 @@ func computeMetrics(g contract.Graph, topN int) Metrics {
 		pkgs[n.Pkg] = struct{}{}
 
 		switch n.Kind {
-		case "func":
+		// "init" is the Rust backend's synthesized const/static initializer
+		// node. It is counted as a function because it IS one — Go's own
+		// `init#N` nodes arrive here as "func" already, so folding it in keeps
+		// the two languages tallying the same thing. Counting it nowhere,
+		// which is what an unlisted kind does, would silently make
+		// Funcs+Methods < len(Nodes) on every Rust map.
+		case "func", "init":
 			m.Funcs++
 		case "method":
 			m.Methods++

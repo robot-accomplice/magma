@@ -1,0 +1,19 @@
+{
+  "fatal": [],
+  "summary": {
+    "considered": 11,
+    "excluded": 1,
+    "agree_dead": 2,
+    "agree_live": 9,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 12,
+    "excluded": 0,
+    "agree_dead": 1,
+    "agree_live": 11,
+    "fatal": 0
+  }
+}

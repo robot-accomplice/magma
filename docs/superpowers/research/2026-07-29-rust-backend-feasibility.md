@@ -286,3 +286,173 @@ requirements rather than leaving them as tribal knowledge. At minimum, the Rust 
    install under `--non-interactive`.
 5. Validate set-identically against the lint oracle on real workspaces before claiming parity —
    the Go bar.
+
+## 9. Plan A oracle results (Task 8, 2026-07-29)
+
+`rust-helper/scripts/oracle-diff.sh` (+ `oracle-diff.jq`) is the measuring instrument: BFS
+reachability from `root` functions over `calls`, diffed by exact `file:line` key against
+`cargo check --message-format=json`'s `dead_code` diagnostics. Direction matters — helper-dead/
+oracle-live is FATAL (false dead code), helper-live/oracle-dead is conservative (report-only).
+Two fixtures (`libonly`, `collision`) carry FATALs that are honest and adjudicated rather than
+bugs (Task 9's residual gap — see below), so `oracle-diff.sh`'s own exit code is not usable as a
+pass/fail gate on its own. `rust-helper/scripts/oracle-gate.sh <workspace-root>` (Task 16) is the
+gate built on top of it: it diffs the observed FATAL set and SUMMARY counts against a committed
+per-fixture baseline (`testdata/<crate>/oracle-expected.json`) and exits 0 only on an exact match,
+so a red run is always real signal. Not wired into CI yet (this repo currently has zero Rust CI
+jobs of any kind; see `rust-helper/README.md`) but runnable directly against any of the seven
+`testdata/` fixtures.
+
+**Fixtures — FATAL = 0 on all three:**
+
+| fixture | total | excluded | FATAL | report-only | agree dead | agree live |
+|---|---|---|---|---|---|---|
+| `testdata/fixture` | 11 | 1 | 0 | 0 | 2 | 8 |
+| `testdata/libonly` | 13 | 2 | 0 | 0 | 5 | 6 |
+| `testdata/multi_impl` | 5 | 0 | 0 | 0 | 0 | 5 |
+
+Normalisation excluded 3 functions total across the fixtures: 2 for `test:true` (a `#[test]`
+item is never compiled under plain `cargo check`, so the oracle is structurally silent on it —
+not the same thing as attribute suppression, but the same class of "the oracle declines to
+answer"), and 1 for a newly-identified **trait-impl cascade suppression**: rustc's `dead_code`
+lint does not emit a per-method diagnostic for a trait-impl method when its trait *and* self type
+are *both* independently already reported dead (verified with 3 isolated `cargo check` probes;
+inherent-impl methods get no such treatment). Both exclusion categories were absent from the
+brief's illustrative script and were added after the sketch produced non-empty FATAL sections on
+two of the three required fixtures — chased to root cause against recorded diagnostics before
+trusting the harness, not assumed away.
+
+Attribute-based normalisation (`#[allow(dead_code)]`, `#[no_mangle]`, `#[used]`,
+`#[export_name]`) is implemented and separately verified against a throwaway crate (none of the
+three required fixtures exercise it): 1 function correctly excluded, 1 sibling genuinely-dead
+function correctly still counted `agree_dead`.
+
+**Real workspace (`~/code/roboticus-rust`, 575k lines): NOT MEASURED here, run pending
+separately.** The helper phase succeeded — `load_workspace` 1.7s, enumerate 11.0s (8,437
+functions), edges 19.4s (12,352 edges, `Semantics`+macro-descent). The oracle phase (`cargo check
+--workspace`) did not finish on the first attempt; a corrected framing from a review round:
+`target/` was **not actually cold** (3,293 cached `.rmeta` files from prior runs), and a retry
+made steady visible progress (~1 crate/second) rather than a from-scratch build. The retry itself
+was handed to the coordinator as a separate, independently-run background task
+(`/tmp/robo-oracle.json`) rather than completed in this document — real-workspace numbers will be
+folded in separately when that lands. Either way, this remains a one-time cost per workspace, not
+recurring, once `target/` is warm.
+
+**Critical finding from that real-workspace run — an empty oracle is not a clean one, and the
+harness could not originally tell the difference.** The coordinator's own runs against
+`roboticus-rust` (warm, after touching every `.rs` file, and after `cargo clean -p
+roboticus-core`) all produced the same result: 744 `compiler-artifact`, 77
+`build-script-executed`, 1 `build-finished`, **zero `compiler-message`** — no diagnostics of any
+kind. `cargo check` only emits diagnostics for crates it actually recompiles; on a warm `target/`
+it silently replays cached artifacts and says nothing, which the harness originally read as "the
+compiler considers nothing dead" and scored as full agreement — a false green, indistinguishable
+from a genuinely clean workspace, for the tool whose entire purpose is making parity measurable.
+A naive fix (refuse when total `compiler-message` count is zero) is itself wrong: `testdata/multi_impl`
+is a genuinely warning-free fixture and produces zero `compiler-message` entries even on a truly
+fresh, cold `cargo check` — message-count alone cannot distinguish "just checked, nothing to
+report" from "never re-checked, silently cached," because both look identical on stdout. The fix
+uses cargo's own freshness signal instead: `cargo check -v` prints `Checking <pkg>`/`Compiling
+<pkg>` to stderr when rustc actually runs, versus `Fresh <pkg>` when it's skipped — verified
+directly (identical crate, back to back: `Checking` + a `Running rustc ...` line on a clean build,
+`Fresh` with no rustc invocation on the immediate rerun; `compiler-artifact` count was identical
+in both cases, so that signal doesn't work either). `oracle-diff.sh` now cross-references every
+workspace-local package name (`cargo metadata --no-deps`) against the set that actually shows
+`Compiling`/`Checking` this run, and refuses (exit 5, naming the stale packages, with a `cargo
+clean` remediation and an honest cost warning — cold checks on a large workspace take minutes to
+tens of minutes) if any workspace package was skipped. Verified: all three fixtures fresh
+(`cargo clean` then run) still score FATAL=0 as before, including `multi_impl`'s genuine
+zero-diagnostics clean pass, which now correctly proceeds instead of refusing; running any
+fixture a second time with no clean in between now refuses with exit 5 every time. **Anyone
+running this harness against a real workspace with a warm `target/` needs `cargo clean` first, or
+the harness will refuse rather than silently hand back a meaningless green.**
+
+**Normalisation, final state:** two disclosed categories (`test:true`, `trait-impl-cascade`,
+above) plus attribute suppression. A third, undisclosed heuristic ("test-module-nested" — exclude
+any function whose module path contained a `test`/`tests` segment) was tried during
+implementation, fired on zero of the three fixtures, and was found by review to silently
+over-exclude a genuinely-live function with no `#[cfg(test)]` gate at all (module-name coincidence
+only). It was removed rather than kept-and-narrowed: a visible FATAL for an edge case is safer
+than an invisible false negative in exactly the mechanism the brief warns divergence hides behind.
+
+**Known blind spot, corrected framing:** Tasks 9 and 11 make the affected functions absent from
+the helper's function list entirely (confirmed directly for Task 9: a default-bodied trait method
+never appears; confirmed via Task 7's own report for Task 11: `include!`-spliced `OUT_DIR`
+functions never reach `enumerate.rs::push`). An earlier draft of this note overstated the
+consequence — repro evidence shows **propagated false dead code IS caught**: a live enumerated
+function whose only caller is one of these invisible functions still shows FATAL, because the
+downstream function is itself a normal node with no incoming edge, so BFS marks it unreached and
+the oracle disagrees. What is genuinely uncovered is narrower: the invisible function's *own*
+liveness status (no opinion, either direction), and untested chained-invisibility cases. Task 10
+has no such blind spot — non-`Adt` self-type impls are enumerated, just mismarked, so a resulting
+false-dead-code case surfaces as an ordinary FATAL entry. The harness also now prints a fixed
+stderr note on every run naming this limitation and Tasks 9/11 directly, so a bare `FATAL: 0`
+cannot be read as "full parity" without it. Full harness design, fixture transcripts, and the
+cascade-suppression and blind-spot root-cause chains are in
+`.superpowers/sdd/2026-07-29-rust-helper/task-8-report.md`.
+
+## 9. Post-implementation re-measurement — the sysroot bug and its cost
+
+Every performance and coverage number recorded above (§7) was taken **before** a defect found
+during implementation: `CargoConfig::default().sysroot` is `None`, so no sysroot was loaded and
+std/core `macro_rules!` items (`println!`, `format!`, `write!`, `vec!`, `assert!`, `matches!`)
+could not resolve. `Semantics::expand_macro_call` cannot expand a macro it cannot resolve, so
+**every call reachable only through a std macro was silently invisible** — in any position.
+
+Fixture tests could not catch this: fixtures use *local* `macro_rules!`, which resolved fine.
+Only a fixture requiring `env!`/`concat!`/`include!` exposed it.
+
+Re-measured on roboticus-rust (575k lines) with `sysroot = Some(RustLibSource::Discover)`:
+
+| | before fix | after fix | delta |
+|---|---|---|---|
+| functions | 8,437 | **10,651** | +2,214 (+26%) |
+| edges | 12,352 | **20,268** | +7,916 (**+64%**) |
+| load | 1.8s | 80.1s | 44× |
+| enumerate | 15.2s | 45.6s | 3× |
+| edges | 31.4s | 186.8s | 6× |
+| **total** | 48.4s | **312.5s** | **6.5×** |
+
+**The pre-fix graph was missing roughly 39% of all edges.** Every one of those was a potential
+false-dead-code source, which is why the fix is not optional under the full-parity bar.
+
+**But §7's conclusion that "48s is acceptable for a pre-audit step" no longer holds.** First-run
+cost on a large workspace is now **5.2 minutes**; freshness-skip still makes re-runs at an
+unchanged clean SHA free. For comparison, Go maps a similarly-sized repo in ~15s — Rust is now
+roughly 20× slower per function.
+
+Two things follow, and both are operator decisions rather than implementation details:
+
+1. The "near-free to run before every task" value proposition needs restating for Rust, or
+2. The 80s sysroot load — the single largest new cost, and a fixed overhead independent of repo
+   size — needs investigation (it may be cacheable across runs).
+
+### 9a. CORRECTION to §9 — the "80s sysroot load" was a misattribution
+
+§9 reported that the sysroot fix added **80.1s** to the load phase and concluded the sysroot load
+needed optimising. **That attribution was wrong**, and the error was mine: I observed the load phase
+go from 1.8s to 80.1s after the config change and attributed it to sysroot loading without isolating
+the cause — diagnosing from a symptom rather than from a controlled measurement.
+
+A controlled A/B (toggling only the sysroot setting, warm cache) puts the **isolated sysroot cost at
+0–6s**, not 78s. Direct re-measurement of the current code on roboticus-rust:
+
+| run | load | enumerate | edges | total |
+|---|---|---|---|---|
+| 1 | **2.0s** | 14.5s | 115.4s | 131.9s |
+| 2 | **2.7s** | 19.3s | 251.5s | 273.6s |
+
+Both runs: 10,651 functions / 20,268 edges — correctness unchanged.
+
+**What the 80.1s actually was:** cold-cache `cargo check` build-script recompilation, which the
+workspace load triggers via `load_out_dirs_from_check`. That is a one-time cost per cache state, not
+a per-run sysroot cost, and it would occur with or without the sysroot setting.
+
+**Where the real cost lives:** edge extraction (115–251s), which is genuine analysis work — the
++64% edges the sysroot fix made visible have to actually be resolved. That is the price of
+correctness, not overhead to be optimised away.
+
+**Second correction — the totals are noisy.** 131.9s vs 273.6s for byte-identical input on
+back-to-back runs is a 2.1× spread, caused by other builds competing for CPU on the same machine.
+§9's "312.5s" was a single sample presented as a figure. Any future performance claim here needs
+repeated runs on an otherwise-idle machine, or it is not a measurement.
+
+Task 14 accordingly shipped **no code change**: there was no 80s sysroot cost to reduce.

@@ -202,3 +202,42 @@ func assertSet(t *testing.T, view string, got, want []string) {
 		}
 	}
 }
+
+// signature.params / signature.results must ALWAYS be arrays on the wire, never
+// null. This is frozen contract wording with Architext, and it was broken in
+// practice: the Rust backend built a Signature without initialising either
+// slice, so 68% of functions in the first real Rust artifact emitted
+// `"params": null` and Architext's validator rejected it outright.
+//
+// `null` and `[]` are different claims — "unknown parameters" vs "no parameters"
+// — and only the second can be true of a function magma has analysed, which is
+// why the fix is here rather than a relaxed schema on their side.
+func TestSignatureArraysNeverMarshalAsNull(t *testing.T) {
+	// The exact shape the Rust backend produced: nil slices, not empty ones.
+	blob, err := json.Marshal(Signature{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(blob) != `{"params":[],"results":[]}` {
+		t.Errorf("a zero Signature must marshal both fields as [], got: %s", blob)
+	}
+
+	// Per-field, because the real defect was per-field: 2,326 functions had one
+	// null and one array.
+	oneSided, err := json.Marshal(Signature{Params: []Param{{Name: "x", Type: "int"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(oneSided), `"results":[]`) {
+		t.Errorf("a populated Params must not leave Results null, got: %s", oneSided)
+	}
+
+	// And through a Node, which is how it actually reaches the wire.
+	nodeBlob, err := json.Marshal(Node{ID: 1, Symbol: "f", Signature: &Signature{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(nodeBlob), "null") {
+		t.Errorf("no null may reach the wire via Node.Signature, got: %s", nodeBlob)
+	}
+}

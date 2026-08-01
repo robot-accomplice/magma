@@ -1,0 +1,21 @@
+{
+  "adjudication": "clean — family G (exported symbols as roots) CLOSED, no adjudicated FATALs",
+  "note": "FAMILY G, found by the post-wiring adversarial review, not by the gate. `#[no_mangle]` and `#[export_name]` make a function externally callable whether or not it is `pub`: the compiler emits the symbol and a C / Python / WASM / interrupt-vector caller invokes it, so nothing inside the Rust graph calls it — exactly as nothing calls `main`. rustc's `dead_code` lint treats such items, and everything they reach, as LIVE. `roots.rs` knew about a bin's `main` and about publicly reachable items but not about exported symbols, so they read as dead.\n\nVERIFIED RED BEFORE THE FIX: 2 FATALs in BOTH configs -- `reached_only_via_no_mangle (src/lib.rs:29)` and `reached_only_via_export_name (src/lib.rs:38)`. That is false dead code on the canonical shape of every Rust library exposed over FFI: a cdylib for C/Python/Node, a staticlib, a WASM export, an embedded interrupt handler. A false dead-code row is the worst failure this tool has -- it is a deletion order for live code.\n\nTHE HARNESS COULD ONLY SEE HALF OF IT, WHICH IS WHY IT SURVIVED. `oracle-diff.sh` excludes any function carrying `#[no_mangle]`/`#[export_name]` from the comparison (see its `attribute:` exclusions), on the sound reasoning that rustc will never report those dead even when they are, so the oracle cannot adjudicate them. True — but the exclusion also meant the helper's OWN answer for those nodes was never checked, so `exported_no_mangle` being reported dead was structurally invisible here. Only the second hop, its callee, leaked through as a FATAL, and no fixture had a second hop. An exclusion that is sound as an oracle-comparison decision can still hide a user-facing defect; that is now five exclusions in this harness found to mask something.\n\nWHY THIS IS NOT 'WIDENING ROOTS TO MAKE SOMETHING GREEN'. The standing rule warns against inventing roots to paper over MISSING EDGES -- the family B trap, where the edge exists in the program and the walker failed to find it. Here there is no edge to find, by construction: the call originates outside the program. The control is `truly_dead`, which is genuinely dead, which rustc agrees is dead, and which is STILL reported after the fix (`agree_dead: 1`). A fix that rooted everything would have lost it.\n\nCounts across the fix: considered stays 4 and excluded stays 2 -- nothing stopped being measured. `agree_live` went 1 -> 3, which is the two formerly-false-dead callees becoming correctly live.\n\nDELIBERATELY NOT HANDLED: `#[cfg_attr(.., no_mangle)]`, which applies the attribute conditionally. That under-approximates toward 'not a root', the same safe direction every other imprecision here takes. `#[unsafe(no_mangle)]` (the spelling Rust 2024 requires) IS handled.\n\nSTILL OPEN, recorded rather than fixed here: the `attribute:` exclusion in `oracle-diff.sh` is now redundant for these two attributes, since a rooted export is `agree_live` rather than a divergence. Removing it modifies the measuring instrument, which belongs in its own task with its own verification, not as a side effect of a source fix.\n\n`ordinary_api` exists so this crate has a public API and does NOT take the 'no roots in scope' refusal -- without it the defect hides behind a refusal instead of surfacing as the FATALs it really is. That refusal is itself worth noting: before this fix, a cdylib with NO `pub` API at all (an entirely reasonable FFI crate) was refused outright on the false premise that it had no entry points.",
+  "fatal": [],
+  "summary": {
+    "considered": 4,
+    "excluded": 2,
+    "agree_dead": 1,
+    "agree_live": 3,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 4,
+    "excluded": 2,
+    "agree_dead": 1,
+    "agree_live": 3,
+    "fatal": 0
+  }
+}
