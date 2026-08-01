@@ -39,7 +39,7 @@ use serde_json::Value;
 
 #[test]
 fn cat_target_reachable_from_main_via_dyn_dispatch() {
-    let bin = env!("CARGO_BIN_EXE_magma-rust-helper-spike");
+    let bin = env!("CARGO_BIN_EXE_magma-rust-helper");
     let out = Command::new(bin)
         .arg("testdata/multi_impl")
         .output()
