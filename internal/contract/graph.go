@@ -93,7 +93,22 @@ type Graph struct {
 	Module          string `json:"module"`
 	SHA             string `json:"sha"`
 	Tree            string `json:"tree"`
-	Fidelity        string `json:"fidelity"` // what an edge MEANS here (e.g. "rta", "syntactic")
+	// Fidelity names what an edge MEANS for this backend. The values magma
+	// actually emits are `"rta"` (Go) and `"semantic"` (Rust) — see the
+	// vocabulary table in README.md, which is the published one.
+	//
+	// This comment previously read `(e.g. "rta", "syntactic")`. `"syntactic"`
+	// is not a value magma has ever emitted, and it was the only place a
+	// consumer could go looking for the vocabulary — so a lookup table built
+	// from it carried one phantom key and was missing a real one. A downstream
+	// gate hit exactly that: an unknown fidelity fell through to its weakest
+	// bar, and 628 of 628 candidates from a genuine RTA call graph were
+	// labelled "guess with confidence, no call graph".
+	//
+	// THE NAME IS OPEN, NOT A CLOSED ENUM. magma adds a language per minor
+	// release and each may name its own fidelity, so a consumer must not fail
+	// closed on an unrecognised value — nor silently treat it as the weakest.
+	Fidelity        string `json:"fidelity"`
 	// ExecutedTargetCode records whether producing this graph RAN the analysed
 	// repository's own code. Go never does: it type-checks only, so the Go
 	// backend leaves this false. The Rust backend does — rust-analyzer executes
