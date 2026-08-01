@@ -156,7 +156,8 @@ magma exits non-zero and writes a refused (but present) set of files when it can
 behind a map:
 
 - **Unsupported / unknown language.** Go and Rust are supported; other languages are detected and
-  refused. Support lands one language per minor release.
+  refused. Support lands one language per minor release — **v0.3.0 is the JavaScript family
+  (TypeScript, Node, Next, React)**.
 - **Rust helper not installed.** A Rust repo is refused, with the install command, when
   `magma-rust-helper` is on neither `PATH` nor `$MAGMA_RUST_HELPER`.
 - **No production `main` in scope.** A library or a single-package scope has no external-caller
