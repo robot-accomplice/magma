@@ -163,14 +163,14 @@ pub fn collect_inits(
 /// anywhere from the item itself up to the crate root — carry over
 /// unchanged, for the same fail-safe-toward-live reasoning documented on
 /// `is_test_context`.
-fn is_init_cfg_test<T: HasAttrs + Copy>(
+fn is_init_cfg_test(
     db: &RootDatabase,
-    item: T,
+    item_cfg_requires_test: bool,
     module: Module,
     file: &str,
 ) -> bool {
     in_test_or_bench_target(file)
-        || item.attrs(db).cfgs(db).is_some_and(cfg_requires_test)
+        || item_cfg_requires_test
         || module
             .path_to_root(db)
             .into_iter()
@@ -190,6 +190,40 @@ fn is_init_cfg_test<T: HasAttrs + Copy>(
 /// worthwhile refactor of `enumerate.rs` as a whole, not something to do to one
 /// function while leaving its three siblings inconsistent.
 #[allow(clippy::too_many_arguments)]
+/// Everything the shared builder below needs that a `const` and a `static`
+/// supply DIFFERENTLY. The two were near-identical 100-line copies —
+/// `push_const` and `push_static` differed in seven mechanical places and
+/// nothing else — with a doc comment justifying the duplication as avoiding
+/// "merge risk" against a concurrently active task. That task ended; the
+/// duplication outlived its reason and every node-metadata change since has
+/// had to be made twice and kept consistent by hand (`test_entry` was).
+struct InitFacts {
+    name: String,
+    /// The declaration's own `HirFileId`, kept because the macro-kind check
+    /// needs it — the resolved real-file `FileId` cannot answer whether the
+    /// item came from an expansion.
+    hir_file: HirFileId,
+    /// `ast::Name` is the SAME type for both `ast::Const` and `ast::Static`,
+    /// which is what lets the location resolution live in the builder instead
+    /// of being copied into each caller.
+    name_node: ra_ap_syntax::ast::Name,
+    module: Module,
+    /// Rendered here rather than in the builder because `Const::ty` and
+    /// `Static::ty` are distinct methods.
+    ty: String,
+    exported: bool,
+    /// `Some` only for an associated const; Rust has no associated statics.
+    assoc: Option<AssocItem>,
+    doc: Option<String>,
+    /// The item's own `#[cfg(..)]` requiring `test`. Precomputed because it is
+    /// the one term of `is_init_cfg_test` that needs the ITEM, while the
+    /// others need the file path the builder computes.
+    item_cfg_requires_test: bool,
+    source: InitSource,
+}
+
+/// `too_many_arguments`: see `push_init`.
+#[allow(clippy::too_many_arguments)]
 fn push_const(
     db: &RootDatabase,
     sema: &Semantics<'_, RootDatabase>,
@@ -208,94 +242,40 @@ fn push_const(
     }
     // Anonymous `const _: T = expr;` -- see collect_inits' doc comment.
     let Some(name) = c.name(db) else { return };
-    let name = name.as_str().to_owned();
     let Some(src) = c.source(db) else { return };
     let Some(name_node) = src.value.name() else {
         return;
     };
-
-    let (file_id, line, column) = match src.file_id.file_id() {
-        Some(efid) => {
-            let file_id = efid.file_id(db);
-            let (line, column) =
-                char_line_col(db, file_id, name_node.syntax().text_range().start());
-            (file_id, line, column)
-        }
-        None => {
-            sema.parse_or_expand(src.file_id);
-            let range = sema.original_range(name_node.syntax());
-            let file_id = range.file_id.file_id(db);
-            let (line, column) = char_line_col(db, file_id, range.range.start());
-            (file_id, line, column)
-        }
-    };
-    let file = repo_relative_path(vfs, root, file_id);
-
     let module = c.module(db);
     let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
-    let test = is_init_cfg_test(db, c, module, &file);
-    let ret_str = c.ty(db).display(db, display_target).to_string();
-    let results = if ret_str == "()" {
-        Vec::new()
-    } else {
-        vec![model::Result_ { ty: ret_str }]
-    };
-
-    let id = *next_id;
-    *next_id += 1;
-    out.push((
-        model::Function {
-            id,
-            symbol: qualified_init_symbol(db, &name, c.as_assoc_item(db), display_target),
-            pkg: module_path_of(db, module),
-            file,
-            line: line + 1,
-            column: column + 1,
-            kind: "init".to_owned(),
+    push_init(
+        db,
+        sema,
+        vfs,
+        root,
+        target_dir,
+        InitFacts {
+            name: name.as_str().to_owned(),
+            hir_file: src.file_id,
+            name_node,
+            module,
+            ty: c.ty(db).display(db, display_target).to_string(),
             exported: c.visibility(db) == Visibility::Public,
-            test,
-            // A const/static item cannot carry #[test]; see model::Function::test_entry.
-            test_entry: false,
-            // Runs whenever the enclosing (non-test) binary starts, so
-            // whatever it calls is genuinely reachable -- same reasoning as
-            // Go's synthesized `init#N` nodes, always roots. `!test`, not
-            // unconditional `true`: test-only code follows the same
-            // never-a-production-root rule `roots::mark` already applies to
-            // every other test item (see its doc comment) -- the all-roots
-            // view is where a #[cfg(test)] item's own root status belongs.
-            root: !test,
-            // No #[bench] analogue exists for a const/static item.
-            bench: false,
-            generated: is_macro_kind_synthetic(db, src.file_id)
-                || vfs
-                    .file_path(file_id)
-                    .as_path()
-                    .map(|p| p.starts_with(target_dir))
-                    .unwrap_or(false),
-            // Family D: never truncated at construction time -- walk.rs sets
-            // this true later, in place, only if its macro-depth guard fires
-            // while walking THIS node's own initializer expression.
-            macro_truncated: false,
-            signature: model::Signature {
-                params: Vec::new(),
-                results,
-            },
+            assoc: c.as_assoc_item(db),
             doc: c.hir_docs(db).map(|d| first_sentence(d.docs())),
-            // Never an assoc item of a *trait impl* method -- `trait_impl`
-            // exists only to key the oracle harness's method-cascade check.
-            trait_impl: None,
+            item_cfg_requires_test: c.attrs(db).cfgs(db).is_some_and(cfg_requires_test),
+            source: InitSource::Const(c),
         },
-        InitSource::Const(c),
-    ));
+        next_id,
+        out,
+    );
 }
 
-/// `Static` counterpart to `push_const` -- see its doc comment for the
-/// shared reasoning; the only structural differences are `Static::name`
-/// returning a bare `Name` (not `Option<Name>`, so no anonymous-static case
-/// exists) and a static never being an associated item (Rust has no
-/// associated statics), so its symbol is always the unqualified `qualify_stem`
-/// fallback.
-/// `too_many_arguments`: see `push_const`.
+/// `Static` counterpart. Only two things differ from `push_const` and both are
+/// properties of the language: `Static::name` returns a bare `Name` rather than
+/// `Option<Name>` (there is no anonymous static), and a static is never an
+/// associated item (Rust has no associated statics), so `assoc` is always
+/// `None` and its symbol takes `qualify_stem`'s unqualified fallback.
 #[allow(clippy::too_many_arguments)]
 fn push_static(
     db: &RootDatabase,
@@ -312,22 +292,65 @@ fn push_static(
     if s.value(db).is_none() {
         return;
     }
-    let name = s.name(db).as_str().to_owned();
     let Some(src) = s.source(db) else { return };
     let Some(name_node) = src.value.name() else {
         return;
     };
+    let module = s.module(db);
+    let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
+    push_init(
+        db,
+        sema,
+        vfs,
+        root,
+        target_dir,
+        InitFacts {
+            name: s.name(db).as_str().to_owned(),
+            hir_file: src.file_id,
+            name_node,
+            module,
+            ty: s.ty(db).display(db, display_target).to_string(),
+            exported: s.visibility(db) == Visibility::Public,
+            assoc: None,
+            doc: s.hir_docs(db).map(|d| first_sentence(d.docs())),
+            item_cfg_requires_test: s.attrs(db).cfgs(db).is_some_and(cfg_requires_test),
+            source: InitSource::Static(s),
+        },
+        next_id,
+        out,
+    );
+}
 
-    let (file_id, line, column) = match src.file_id.file_id() {
+/// The node construction both initializer kinds share. Mirrors `push`'s
+/// real-file/macro-expansion location handling exactly (still duplicated
+/// against `push` itself, for the reason `decl_loc` records: needing the raw
+/// `FileId` back for the `generated` check, not just a repo-relative string).
+///
+/// `too_many_arguments`: `db`/`sema`/`vfs`/`root`/`target_dir` is the invariant
+/// analysis context every enumeration helper on this path threads. Bundling it
+/// into a context struct is the next step of the structural-debt task, done
+/// across `enumerate.rs` at once rather than to one function in isolation.
+#[allow(clippy::too_many_arguments)]
+fn push_init(
+    db: &RootDatabase,
+    sema: &Semantics<'_, RootDatabase>,
+    vfs: &Vfs,
+    root: &AbsPath,
+    target_dir: &AbsPath,
+    facts: InitFacts,
+    next_id: &mut u32,
+    out: &mut Vec<(model::Function, InitSource)>,
+) {
+    let (file_id, line, column) = match facts.hir_file.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
             let (line, column) =
-                char_line_col(db, file_id, name_node.syntax().text_range().start());
+                char_line_col(db, file_id, facts.name_node.syntax().text_range().start());
             (file_id, line, column)
         }
         None => {
-            sema.parse_or_expand(src.file_id);
-            let range = sema.original_range(name_node.syntax());
+            sema.parse_or_expand(facts.hir_file);
+            let range = sema.original_range(facts.name_node.syntax());
             let file_id = range.file_id.file_id(db);
             let (line, column) = char_line_col(db, file_id, range.range.start());
             (file_id, line, column)
@@ -335,14 +358,12 @@ fn push_static(
     };
     let file = repo_relative_path(vfs, root, file_id);
 
-    let module = s.module(db);
-    let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
-    let test = is_init_cfg_test(db, s, module, &file);
-    let ret_str = s.ty(db).display(db, display_target).to_string();
-    let results = if ret_str == "()" {
+    let display_target = DisplayTarget::from_crate(db, facts.module.krate(db).into());
+    let test = is_init_cfg_test(db, facts.item_cfg_requires_test, facts.module, &file);
+    let results = if facts.ty == "()" {
         Vec::new()
     } else {
-        vec![model::Result_ { ty: ret_str }]
+        vec![model::Result_ { ty: facts.ty }]
     };
 
     let id = *next_id;
@@ -350,34 +371,46 @@ fn push_static(
     out.push((
         model::Function {
             id,
-            symbol: qualified_init_symbol(db, &name, None, display_target),
-            pkg: module_path_of(db, module),
+            symbol: qualified_init_symbol(db, &facts.name, facts.assoc, display_target),
+            pkg: module_path_of(db, facts.module),
             file,
             line: line + 1,
             column: column + 1,
             kind: "init".to_owned(),
-            exported: s.visibility(db) == Visibility::Public,
+            exported: facts.exported,
             test,
             // A const/static item cannot carry #[test]; see model::Function::test_entry.
             test_entry: false,
-            root: !test, // see push_const's comment on the same field
+            // Runs whenever the enclosing (non-test) binary starts, so
+            // whatever it calls is genuinely reachable -- same reasoning as
+            // Go's synthesized `init#N` nodes, always roots. `!test`, not
+            // unconditional `true`: test-only code follows the same
+            // never-a-production-root rule `roots::mark` already applies to
+            // every other test item (see its doc comment) -- the all-roots
+            // view is where a #[cfg(test)] item's own root status belongs.
+            root: !test,
+            // No #[bench] analogue exists for a const/static item.
             bench: false,
-            generated: is_macro_kind_synthetic(db, src.file_id)
+            generated: is_macro_kind_synthetic(db, facts.hir_file)
                 || vfs
                     .file_path(file_id)
                     .as_path()
                     .map(|p| p.starts_with(target_dir))
                     .unwrap_or(false),
-            // Family D: see push_const's identical comment on this field.
+            // Family D: never truncated at construction time -- walk.rs sets
+            // this true later, in place, only if its macro-depth guard fires
+            // while walking THIS node's own initializer expression.
             macro_truncated: false,
             signature: model::Signature {
                 params: Vec::new(),
                 results,
             },
-            doc: s.hir_docs(db).map(|d| first_sentence(d.docs())),
+            doc: facts.doc,
+            // Never an assoc item of a *trait impl* method -- `trait_impl`
+            // exists only to key the oracle harness's method-cascade check.
             trait_impl: None,
         },
-        InitSource::Static(s),
+        facts.source,
     ));
 }
 
