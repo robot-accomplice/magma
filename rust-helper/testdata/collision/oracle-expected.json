@@ -1,0 +1,69 @@
+{
+  "fatal": [
+    {
+      "symbol": "Amb::dead_method",
+      "pkg": "collision::dead_side",
+      "file": "src/main.rs",
+      "line": 12,
+      "column": 12,
+      "reason": "Task-9 residual gap: trait-declaration node (trait_impl:null) of a method whose whole trait+impl+type cluster is independently dead. rustc collapses the whole-cluster-dead case to one diagnostic per item ('trait `Amb` is never used' on the trait's own name line 11, 'struct `Widget` is never constructed' on line 14) and emits nothing on dead_method's own declaration line (12) at either the trait-decl or impl copy — confirmed empirically, only 3 dead_code diagnostics exist for this whole crate, none naming dead_method. The trait-impl-cascade exclusion only ever covers impl nodes (trait_impl set); this is the trait-decl copy, architecturally uncovered by that mechanism."
+    },
+    {
+      "symbol": "Amb::live_method",
+      "pkg": "collision::live_side",
+      "file": "src/main.rs",
+      "line": 22,
+      "column": 12,
+      "reason": "Trait-declaration node (trait_impl:null) with no incoming call-graph edge: calls to live_method resolve statically to the impl's own node (src/main.rs:27), never to this trait-declaration copy, so the helper marks this node unreachable even though live_method genuinely is live. rustc has no diagnostic here either (live_method is genuinely used, via the impl) so oracle_dead is also false at this line -- helper_dead=true/oracle_dead=false is the FATAL shape, but both sides agree the underlying method is live; only this trait-decl copy's own reachability is structurally unrepresentable."
+    },
+    {
+      "symbol": "<Widget as Amb>::never_used",
+      "pkg": "collision::live_side",
+      "file": "src/main.rs",
+      "line": 28,
+      "column": 12,
+      "reason": "Impl node (trait_impl set, trait `Amb`@21:15 NOT independently dead so the cascade does not fire) for a method that is genuinely unused. rustc attributes its single 'method `never_used` is never used' diagnostic to the TRAIT's own method-declaration line (src/main.rs:23, the trait-decl copy, which correctly lands in agree_dead) rather than to this impl's own declaration line (28) -- confirmed directly against cargo check's JSON output. This impl copy therefore has no diagnostic at its own key and surfaces as a disclosed FATAL."
+    }
+  ],
+  "summary": {
+    "considered": 6,
+    "excluded": 1,
+    "agree_dead": 1,
+    "agree_live": 2,
+    "fatal": 3
+  },
+  "executed_target_code": true,
+  "fatal_test": [
+    {
+      "symbol": "Amb::dead_method",
+      "pkg": "collision::dead_side",
+      "file": "src/main.rs",
+      "line": 12,
+      "column": 12,
+      "reason": "H5 (test-config direction): same Task-9 residual gap as the plain-config entry above, reproduced identically under the test-profile oracle. None of Amb/dead_side/Widget is test-context, so the all-roots seed adds nothing here and the helper's verdict is unchanged. rustc's test-profile compile collapses the same whole-cluster-dead case to the same two diagnostics ('trait `Amb` is never used', 'struct `Widget` is never constructed') and still emits nothing on dead_method's own trait-declaration line -- the trait-impl-cascade exclusion still only covers impl nodes (trait_impl set), not this trait-decl copy, in either config."
+    },
+    {
+      "symbol": "Amb::live_method",
+      "pkg": "collision::live_side",
+      "file": "src/main.rs",
+      "line": 22,
+      "column": 12,
+      "reason": "H5 (test-config direction): same structural gap as the plain-config entry above. The trait-declaration node has no incoming call-graph edge in either config (calls still resolve statically to the impl's own node), and live_method is not test-context, so all-roots reachability does not change its status. rustc's test-profile compile also has no diagnostic here (live_method is genuinely used via the impl) -- helper_dead_all=true/oracle_dead_test=false is the same FATAL shape, both sides still agree the underlying method is live; only this trait-decl copy's own reachability is structurally unrepresentable, in either config."
+    },
+    {
+      "symbol": "<Widget as Amb>::never_used",
+      "pkg": "collision::live_side",
+      "file": "src/main.rs",
+      "line": 28,
+      "column": 12,
+      "reason": "H5 (test-config direction): same structural gap as the plain-config entry above. never_used is not test-context, so all-roots reachability is unchanged. rustc's test-profile compile attributes the same single 'method `never_used` is never used' diagnostic to the trait's own method-declaration line (23, the trait-decl copy, landing in agree_dead_test) rather than to this impl's own declaration line (28) -- confirmed against the test-profile cargo check JSON output directly, same as the plain-config oracle."
+    }
+  ],
+  "summary_test": {
+    "considered": 6,
+    "excluded": 1,
+    "agree_dead": 1,
+    "agree_live": 2,
+    "fatal": 3
+  }
+}

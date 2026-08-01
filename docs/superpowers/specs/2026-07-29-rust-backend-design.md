@@ -125,8 +125,16 @@ and `ast::MethodCallExpr` via `resolve_method_call`.
 | **total** | 43.4s | **48.4s** |
 
 Roughly **11× more edges for ~7% more wall time**. Correctness and performance point the same
-way, so there is no trade-off to adjudicate. 48s for a 575k-line workspace is acceptable for a
-pre-audit step, and freshness-skip keeps re-runs free.
+way, so there is no trade-off to adjudicate.
+
+> **SUPERSEDED — the numbers in this table predate the sysroot fix.** This section originally
+> concluded that "48s for a 575k-line workspace is acceptable for a pre-audit step." Both the
+> figures and that conclusion are stale: they were measured while `CargoConfig::default().sysroot`
+> was `None`, so the helper could not resolve any std macro and was blind to every call reachable
+> only through one. Re-measured, the same workspace yields **10,651 functions / 20,268 edges
+> (+64% edges) in 312.5s**. See §Runtime expectations below and research doc §9. The table is kept
+> because the `outgoing_calls`-vs-`Semantics` comparison it makes is still valid — both columns
+> were measured under the same blindness, so the *ratio* holds even though the absolutes do not.
 
 Two caveats carried into implementation:
 
@@ -327,6 +335,33 @@ per bar #2.
 
 **Rust must be indistinguishable from Go to every consumer** — that is requirement 2 of the bar.
 
+### OPEN CONTRACT QUESTION: should the artifact record that code was executed?
+
+Raised by the Architext side (2026-07-29), and worth deciding before Rust ships.
+
+**Settled part:** declining execution is **always a hard refusal**, never a degraded map. So
+"Rust map, execution declined, build-script code invisible" is not an emittable state — a
+consumer can never receive a map that silently lacks those edges. That is the rule in §Gates and
+it is not in question.
+
+**Open part:** the artifact does not *record* that execution happened. A consumer can only
+**derive** it — "language is `rust` and `computable` is true, therefore code was executed" — which
+is a convention they must know, not a fact they can read.
+
+Arguments both ways, honestly:
+
+- **Against a field:** it is derivable today, and magma does not add what it does not need (YAGNI).
+- **For a field:** "derivable if you know the rule" is a poor property for a **trust boundary**.
+  Go analysis *reads*; Rust analysis *executes*. That is a categorical difference in what running
+  magma does to your machine, and consumers model it as a first-class architecture fact rather
+  than a rendering detail. It also stops being derivable the moment sandboxed execution lands
+  (deferred, not cancelled), at which point `rust + computable` would no longer imply "executed
+  unsandboxed".
+
+**Leaning:** add it — a single honest boolean (e.g. `executed_target_code`) rather than a
+provenance object. Requires the same Architext handshake as `fidelity: "semantic"`, and both can
+travel together. **Operator decision pending.**
+
 ## Security
 
 magma's Go analysis never executes target code. **Rust analysis does** — `build.rs` scripts and
@@ -395,3 +430,98 @@ Until (2) passes set-identically, Rust does not ship. That is what decision 1 me
 Steps 2 and 3 were the design's two real risks. **Both were retired during the spike** — the
 prod/test split is settled and the Semantics walker is built, verified against the oracle, and
 performance-measured. What remains is porting proven approaches, not discovering them.
+
+## Runtime expectations — per language AND per project
+
+**Correcting an earlier claim in this spec.** It previously asserted that "48s for a 575k-line
+workspace is acceptable for a pre-audit step." That figure was measured before the sysroot defect
+was found (see the research doc §9) and no longer holds: the same workspace now takes **312.5s**.
+More importantly, quoting any single number was the wrong shape of promise.
+
+magma's stated value is that it is **near-free to run before every task**. That remains true, but
+it needs stating precisely, because it holds for different reasons at different times:
+
+- **Re-runs are free, in every language.** Freshness-skip means an unchanged clean tree at the same
+  SHA does no analysis at all. This is the case that actually recurs in a working session.
+- **First-run cost varies by language, and substantially.** Go analyses a ~575k-line repo in ~15s.
+  Rust analyses a comparable repo in **roughly 2–5 minutes** — because rust-analyzer performs full
+  type inference and macro expansion where Go's RTA does not, and because Rust requires executing
+  build scripts that Go has no analogue for.
+- **The cost is in the analysis, not in overhead.** Measured phase breakdown on a 575k-line
+  workspace: workspace load ~2s, enumeration ~15–19s, **edge extraction 115–251s**. Edge extraction
+  dominates, and that is genuine work — resolving the calls that make the graph correct. There is no
+  large fixed overhead to optimise away. (An earlier revision of this section claimed a ~80s fixed
+  sysroot cost; that was a misattribution — the isolated sysroot cost is 0–6s and the observed 80s
+  was one-time cold-cache build-script recompilation. See research doc §9a.)
+- **First-run cost also varies by project, within a language.** It scales with function and edge
+  count, not line count, so a macro-heavy or generic-heavy crate costs more than its size suggests.
+- **Timings on a busy machine are not measurements.** Byte-identical input on back-to-back runs
+  produced 131.9s and 273.6s — a 2.1× spread from CPU contention. Any performance figure quoted here
+  must come from repeated runs on an otherwise-idle machine, or it is a sample, not a number.
+
+**What magma should promise, and what it should not.** It should not promise a wall-clock number.
+It should promise that (a) re-running is free, (b) the first run's cost is bounded and reported,
+and (c) the cost is never paid twice for the same tree. Documentation and `--help` should say that
+Rust analysis is materially slower than Go's and why — a user who expects Go-like timings and
+meets a five-minute Rust run will reasonably assume something has hung.
+
+This is a **product-surface** requirement, not just a doc note: the CLI already prints a progress
+panel, and for Rust it should make the expensive phases legible (sysroot load, workspace load,
+enumeration, edges) so a long run reads as working rather than stuck.
+
+## DECIDED: the artifact records that code was executed
+
+Resolving the open question above (operator, 2026-07-29): **add the field.**
+
+`magma-code-graph/1` gains one boolean:
+
+```jsonc
+"executed_target_code": true    // this map was produced by running the analysed repo's code
+```
+
+- **Rust, computable** → `true`. Build scripts and proc macros ran; that is required for
+  correctness and cannot be gated away (§Gates).
+- **Go** → `false`. Go analysis type-checks and builds IR; it never executes target code.
+- **Any refusal** → `false`. Consent was declined or the analysis never ran, so nothing executed.
+
+Rationale for carrying a technically-derivable field: it is security-relevant, and "derivable if
+you know the rule" is the wrong property for a trust boundary. It also stops being derivable the
+moment sandboxed execution lands (a Non-goal here, deferred not cancelled) — at that point
+`language == "rust"` would no longer imply *unsandboxed* execution, and a consumer reading the
+field would still be correct where one applying the rule would not.
+
+The helper emits the same fact in `magma-rust-helper/1` so magma's Go side passes it through
+rather than re-deriving it. Additive to Architext's schema, which accepts unknown fields; notify
+them alongside `fidelity: "semantic"` before either ships.
+
+## Contract governance: a new VALUE is one-sided, a new FIELD is two-sided
+
+**Learned the hard way (2026-07-29).** This spec previously described both `fidelity: "semantic"`
+and `executed_target_code` as "additive, validates against Architext's schema unchanged." That was
+right for one and wrong for the other, and the consumer caught it by running their real validator
+against an artifact carrying both:
+
+```
+Architext validation failed:
+- codeGraph: Additional properties are not allowed ('executed_target_code' was unexpected)
+```
+
+`fidelity: "semantic"` passed cleanly **in the same document**, which isolates the cause exactly:
+
+| change | why it behaves that way |
+|---|---|
+| **New value** on an existing property (`fidelity: "semantic"`) | their schema declares `"fidelity": {"type":"string"}`, unconstrained — any string validates. **One-sided:** magma can ship it. |
+| **New property** (`executed_target_code`) | their root object sets `"additionalProperties": false`, so *any* undeclared property is rejected regardless of type or value. **Two-sided:** the consumer must declare it before magma emits it. |
+
+Had this shipped undeclared, **every artifact magma produced would have failed validation on day
+one** — the same shape of failure as the `tree`-carrying-the-SHA bug, and for the same underlying
+reason: a change that is obviously additive from the producer's side is not automatically additive
+across a strict consumer contract.
+
+**Standing rule for `magma-code-graph/1`:** before emitting any **new field**, notify the consumer
+with the field name and type so they can declare it first. New *values* on existing fields do not
+need this. Their `additionalProperties: false` is deliberate — it is what stops a typo'd field
+passing silently — so the strictness is a feature, and the coordination cost is the price of it.
+
+(Resolved: they declared `executed_target_code` as an optional boolean, with a conformance fixture
+and a regression test recording the reproduction. Both changes validate today.)

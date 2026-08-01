@@ -14,14 +14,18 @@ const contractVersion = "magma-code-graph/1"
 // call graph in the shape Architext ingests. Fine tier: Functions + Calls.
 // Coarse tier: Modules + ModuleCalls (see rollup.go).
 type CodeGraph struct {
-	ContractVersion     string       `json:"contract_version"`
-	Generator           string       `json:"generator"`
-	Language            string       `json:"language"`
-	Module              string       `json:"module"`
-	SHA                 string       `json:"sha"`
-	Tree                string       `json:"tree"`
-	Fidelity            string       `json:"fidelity"`
-	Computable          bool         `json:"computable"`
+	ContractVersion string `json:"contract_version"`
+	Generator       string `json:"generator"`
+	Language        string `json:"language"`
+	Module          string `json:"module"`
+	SHA             string `json:"sha"`
+	Tree            string `json:"tree"`
+	Fidelity        string `json:"fidelity"`
+	Computable      bool   `json:"computable"`
+	// Declared by Architext ahead of magma emitting it (their
+	// code_graph_accepts_magmas_forthcoming_fields test), so adding it is
+	// already-coordinated rather than a new two-sided change.
+	ExecutedTargetCode  bool         `json:"executed_target_code"`
 	NotComputableReason string       `json:"not_computable_reason,omitempty"`
 	Functions           []Function   `json:"functions"`
 	Calls               []Call       `json:"calls"`
@@ -82,6 +86,7 @@ func Emit(g contract.Graph) CodeGraph {
 		ContractVersion: contractVersion, Generator: g.Generator,
 		Language: g.Language, Module: g.Module, SHA: g.SHA, Tree: treeState(g.Tree),
 		Fidelity: g.Fidelity, Computable: g.Computable, NotComputableReason: g.NotComputableReason,
+		ExecutedTargetCode: g.ExecutedTargetCode,
 	}
 	if !g.Computable {
 		return cg // nil Functions/Calls/Modules/ModuleCalls

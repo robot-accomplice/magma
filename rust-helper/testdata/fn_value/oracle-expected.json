@@ -1,0 +1,20 @@
+{
+  "adjudication": "fixed-family-a-and-family-c",
+  "fatal": [],
+  "summary": {
+    "considered": 7,
+    "excluded": 0,
+    "agree_dead": 1,
+    "agree_live": 6,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 7,
+    "excluded": 0,
+    "agree_dead": 1,
+    "agree_live": 6,
+    "fatal": 0
+  }
+}

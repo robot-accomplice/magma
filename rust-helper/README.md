@@ -1,58 +1,52 @@
-# rust-helper — spike-verified starting point (NOT production)
+# magma-rust-helper
 
-This is the **verified spike code** from the Rust backend feasibility investigation, landed in the
-repo so it is not lost again. It is the starting point for the helper described in
-`docs/superpowers/specs/2026-07-29-rust-backend-design.md` — **not** the shipped helper.
+The Rust backend for [magma](../README.md). Extracts a call graph from a Cargo
+workspace using rust-analyzer as a library, and emits it as `magma-rust-helper/1`
+JSON on stdout.
 
-## What it is
+magma runs this for you — you should not normally need to invoke it directly.
 
-A Rust binary that drives rust-analyzer as a library to extract a call graph from a Cargo
-workspace. Run it:
+## Install
 
-```sh
-cargo build --release            # release is mandatory — see below
-./target/release/magma-rust-helper-spike <workspace-root>            # Semantics walker (correct)
-./target/release/magma-rust-helper-spike <workspace-root> --outgoing # outgoing_calls (defective)
+```bash
+cargo install --path .        # from this directory
 ```
 
-Output: `EDGE\t<caller>\t<callee>` on stdout, `TIMING …` on stderr.
+magma finds it on `PATH`, or at `$MAGMA_RUST_HELPER`. Without it, a Rust repo is
+refused with an install hint rather than analysed partially.
 
-## What it proves
+## Why it is a separate binary
 
-Run against `testdata/fixture` (which mirrors magma's Go `livemod` plus Rust's hard cases —
-`dyn` dispatch, generics, `macro_rules!`, a `#[cfg(test)]` test):
+It links rust-analyzer (`ra_ap_*`, pinned `=0.0.343`), so it cannot ship through
+`go install` the way the rest of magma does. The version pin is load-bearing —
+these crates make breaking changes across patch releases.
 
-- The `Semantics` walker finds **8 edges**; `--outgoing` finds **7**. The missing one is
-  `main → macro_target` — a macro-generated call that `Analysis::outgoing_calls` silently drops,
-  which would have produced **false dead code**.
-- Derived reachability matches rustc's `dead_code` lint exactly: dead = `{dead}`,
-  test-only = `{only_test}`.
+## Contract
 
-Measured on roboticus-rust (575k lines): 48.4s total, 8,437 functions, 49,316 raw edges.
+- **stdout carries JSON and nothing else.** Progress and timings go to stderr,
+  prefixed `PROGRESS ` and `TIMING `; magma surfaces the former as live progress.
+- **An honest map or an honest refusal, never a partial one.** A workspace that
+  does not type-check, has no roots in scope, or is not a Cargo project emits
+  `{"computable": false, "reason": ...}` and exits 0 — a refusal is a real
+  answer, not an error. Only usage misuse exits nonzero (2), matching Go's
+  convention so magma can drive both backends identically.
+- **Every imprecision fails toward "live".** Desugared calls (operators, `for`,
+  `await`, format args, `?`'s error conversion, `Drop` at scope exit) resolve
+  from types rather than syntax and are emitted as `dynamic` — real
+  over-approximations, never invented edges. A node this map calls dead is dead
+  conservatively.
 
-## Three things that cost real time to discover
+## Correctness harness
 
-1. **Build in release.** Debug measured 710s vs 48s — 16×, and the debug edge phase failed to
-   complete at all on three attempts. Debug binary is 121 MB; release is 22 MB.
-2. **`ra_ap_hir::attach_db(db, || …)` is mandatory** around all `Semantics` work. rust-analyzer's
-   type inference needs the salsa DB attached to the calling thread; `Analysis::with_db` does it
-   internally, `Semantics` does not, and inference panics deep in
-   `hir_ty::next_solver::interner` with *"Try to use attached db, but not db is attached"*.
-   Nothing in the `Semantics` API surface hints at this.
-3. **Filter to `CrateOrigin::Local`.** Without it enumeration returns 118,081 functions
-   (the whole dependency closure + std) instead of 8,437. This is the Rust analogue of the Go
-   backend's `inModule` filter, and omitting it produces exactly the false-dead-code failure
-   HANDOFF.md already records for Go.
+The oracle gate compares every fixture against rustc's own `dead_code` lint in
+two configurations, and fails on ANY divergence from a committed baseline — in
+both directions, since a baselined divergence that vanishes usually means an
+exclusion silently widened.
 
-## Known gaps before this is production
+```bash
+scripts/oracle-gate.sh testdata/collision
+```
 
-- **No deduplication.** Every resolved target is pushed; Go's `collectEdges` aggregates per
-  `(from, to)` and upgrades `dynamic` → `static`. The 49,316 figure is therefore a raw count.
-- **No JSON output.** Emits ad-hoc `EDGE` lines; the spec's contract is one JSON document.
-- **No node metadata.** Does not yet emit `is_test` / `is_main` / `is_bench` flags, signatures,
-  file/line, or the crate/module path — all required by the contract.
-- **No refusals.** Missing toolchain and declined-consent paths are unimplemented.
-- **Crate name is `magma-rust-helper-spike`** — rename when it becomes the real helper.
-
-Dependencies are pinned exactly (`=0.0.343`); `ra_ap_*` offers no API stability guarantee, so
-updates must be deliberate and reviewed.
+Run it for every fixture before changing anything here; CI does the same.
+`testdata/*/oracle-expected.json` carries a written reason for each adjudicated
+divergence.
