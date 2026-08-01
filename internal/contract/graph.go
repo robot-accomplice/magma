@@ -11,6 +11,25 @@ import (
 // breaking change to the envelope.
 const GraphVersion = "codemap-graph/1"
 
+// Param is one function parameter: its name (may be empty for unnamed params)
+// and its module-relative type string (e.g. "contract.Graph", "int").
+type Param struct {
+	Name string `json:"name,omitempty"`
+	Type string `json:"type"`
+}
+
+// Result is one function result type. Result names are intentionally dropped —
+// the type is the architecture-relevant fact.
+type Result struct {
+	Type string `json:"type"`
+}
+
+// Signature is a function's parameters and results, as rendered by the backend.
+type Signature struct {
+	Params  []Param  `json:"params"`
+	Results []Result `json:"results"`
+}
+
 // Node is one function or method in the program.
 type Node struct {
 	ID        int    `json:"id"`
@@ -29,6 +48,30 @@ type Node struct {
 	// ProdReachable is true when a path exists from a NON-test root. A node that
 	// is Reachable but not ProdReachable is reached only by tests.
 	ProdReachable bool `json:"prod_reachable"`
+
+	// Signature is the function's parameters and results. Nil for backends that
+	// do not (yet) extract signatures. Set for every Go node.
+	Signature *Signature `json:"signature,omitempty"`
+	// Doc is the first sentence of the declaration's doc comment ("" if none).
+	Doc string `json:"doc,omitempty"`
+	// FanIn / FanOut are the distinct in/out call-edge counts, derived from the graph.
+	FanIn  int `json:"fan_in"`
+	FanOut int `json:"fan_out"`
+}
+
+// IsDead reports whether this node is production-dead: reachable from no root.
+// Roots are reachable by definition; generated code is not hand-audited for
+// deadness. This is the per-node predicate DeadView filters on.
+func (n Node) IsDead() bool {
+	return !n.Reachable && !n.Generated && !n.Root
+}
+
+// IsTestOnly reports whether this node is production code kept alive only by
+// tests: reachable (with tests) but not production-reachable, and itself declared
+// in production, non-generated, non-root code. This is the per-node predicate
+// TestOnlyView filters on.
+func (n Node) IsTestOnly() bool {
+	return n.Reachable && !n.ProdReachable && !n.Test && !n.Root && !n.Generated
 }
 
 // Edge is a call from one node to another. Kind distinguishes a resolved static
@@ -44,13 +87,39 @@ type Edge struct {
 // Graph is the primary artifact: the call graph of a repository at one SHA.
 // _dead / _test-only notes are derived from it, not computed separately.
 type Graph struct {
-	ContractVersion     string `json:"contract_version"`
-	Generator           string `json:"generator"`
-	Language            string `json:"language"`
-	Module              string `json:"module"`
-	SHA                 string `json:"sha"`
-	Tree                string `json:"tree"`
-	Fidelity            string `json:"fidelity"` // what an edge MEANS here (e.g. "rta", "syntactic")
+	ContractVersion string `json:"contract_version"`
+	Generator       string `json:"generator"`
+	Language        string `json:"language"`
+	Module          string `json:"module"`
+	SHA             string `json:"sha"`
+	Tree            string `json:"tree"`
+	// Fidelity names what an edge MEANS for this backend. The values magma
+	// actually emits are `"rta"` (Go) and `"semantic"` (Rust) — see the
+	// vocabulary table in README.md, which is the published one.
+	//
+	// This comment previously read `(e.g. "rta", "syntactic")`. `"syntactic"`
+	// is not a value magma has ever emitted, and it was the only place a
+	// consumer could go looking for the vocabulary — so a lookup table built
+	// from it carried one phantom key and was missing a real one. A downstream
+	// gate hit exactly that: an unknown fidelity fell through to its weakest
+	// bar, and 628 of 628 candidates from a genuine RTA call graph were
+	// labelled "guess with confidence, no call graph".
+	//
+	// THE NAME IS OPEN, NOT A CLOSED ENUM. magma adds a language per minor
+	// release and each may name its own fidelity, so a consumer must not fail
+	// closed on an unrecognised value — nor silently treat it as the weakest.
+	Fidelity string `json:"fidelity"`
+	// ExecutedTargetCode records whether producing this graph RAN the analysed
+	// repository's own code. Go never does: it type-checks only, so the Go
+	// backend leaves this false. The Rust backend does — rust-analyzer executes
+	// `build.rs` scripts and expands proc macros to load a workspace at all — and
+	// the helper reports it per run rather than hard-coding it, so it stays
+	// honest if a sandboxed mode is ever added.
+	//
+	// A trust-boundary fact, which is why it is carried explicitly rather than
+	// left for a consumer to infer from `language == "rust"`. The helper has
+	// always emitted it; until now magma parsed and dropped it.
+	ExecutedTargetCode  bool   `json:"executed_target_code"`
 	Computable          bool   `json:"computable"`
 	NotComputableReason string `json:"not_computable_reason,omitempty"`
 	Nodes               []Node `json:"nodes"`
@@ -112,7 +181,7 @@ func (g Graph) DeadView(m Meta) Note {
 	}
 	var rows []Row
 	for _, n := range g.Nodes {
-		if !n.Reachable && !n.Generated && !n.Root {
+		if n.IsDead() {
 			rows = append(rows, Row{Symbol: n.Symbol, File: n.File, Line: n.Line})
 		}
 	}
@@ -135,7 +204,7 @@ func (g Graph) TestOnlyView(m Meta) Note {
 	}
 	var rows []Row
 	for _, n := range g.Nodes {
-		if n.Reachable && !n.ProdReachable && !n.Test && !n.Root && !n.Generated {
+		if n.IsTestOnly() {
 			rows = append(rows, Row{Symbol: n.Symbol, File: n.File, Line: n.Line})
 		}
 	}
@@ -157,4 +226,34 @@ func WriteGraph(dir string, g Graph) error {
 	}
 	b = append(b, '\n')
 	return os.WriteFile(filepath.Join(dir, "graph.json"), b, 0o644)
+}
+
+// MarshalJSON guarantees Params and Results serialize as ARRAYS, never null.
+//
+// The contract handshake with Architext froze this wording: "functions[].signature
+// is ALWAYS present (object, never omitted): {"params":[...],"results":[...]} —
+// both arrays always present, possibly empty." A nil Go slice marshals to `null`,
+// so any backend that builds a Signature without initialising both fields
+// silently breaks that.
+//
+// It happened: the Rust backend built `&Signature{}` and appended, so a function
+// with no parameters emitted `"params": null`. Architext's validator rejected the
+// first real Rust artifact over it — 68% of functions had null params, 50% null
+// results. The Go backend had always initialised both explicitly (signatureOf),
+// so the invariant lived in one backend's code rather than in the type, and the
+// second backend did not inherit it.
+//
+// Enforced here so it cannot depend on a backend author remembering. `null` and
+// `[]` are different claims — "unknown parameters" versus "no parameters" — and
+// only the second is ever true of a function magma has analysed.
+func (s Signature) MarshalJSON() ([]byte, error) {
+	type signatureJSON Signature // distinct type: avoids recursing into this method
+	out := signatureJSON(s)
+	if out.Params == nil {
+		out.Params = []Param{}
+	}
+	if out.Results == nil {
+		out.Results = []Result{}
+	}
+	return json.Marshal(out)
 }

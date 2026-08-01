@@ -1,0 +1,21 @@
+{
+  "adjudication": "family-f-path-and-generated-CLOSED; residual root/exported over-reporting still open (safe direction)",
+  "note": "Family F is now fixed for the two defects it was filed for. The derived `impl core::fmt::Debug for Widget`'s `fmt` method used to be emitted with `file` resolving to `~/.rustup/toolchains/<toolchain>/lib/rustlib/src/rust/library/core/src/fmt/mod.rs` (line 1084 on the toolchain observed on this machine) and `generated: false`; it is now emitted at the `Widget` name token carrying the `#[derive]` in `src/lib.rs` with `generated: true`. Root cause, verified directly rather than inferred: `core/src/fmt/mod.rs:1084` is literally `fn fmt(&self, f: &mut Formatter<'_>) -> Result;`, i.e. the TRAIT's own method declaration, and rust-analyzer resolves a builtin-derive method's `source(db)` to it with `macro_file()` returning None -- so the item looked like an ordinary file to every macro-kind check. `enumerate::relocate_out_of_root` repairs the location and `main::non_local_paths` refuses outright on any node that still escapes the workspace root, which is the only check that can see this class at all (see below).\n\nWHY THE COUNTS MOVED (considered 2 -> 1, excluded 0 -> 1, generated 1). This is the single deliberate exclusion-boundary movement in Phase B, and it cannot hide a FATAL. `generated: true` is now correct for this node -- no human wrote `fn fmt` -- and `oracle-diff.jq` excludes generated nodes, so the node leaves `considered`. It cannot mask a divergence because rustc structurally never emits `dead_code` for an unused derived impl: measured directly on a probe crate whose `Widget` derives Debug/Clone/PartialEq/Default/Hash/PartialOrd with every one of them entirely unused, `cargo check --message-format=json` reports ZERO `dead_code` diagnostics. The node was therefore permanently `agree_live` before this change and is permanently un-flaggable after it; no FATAL can ever live at this key in either state.\n\nSTILL OPEN, UNCHANGED, AND DELIBERATELY NOT FIXED HERE: `root: true` and `exported: true` are both still wrong for a synthesized derive method. rust-analyzer represents the generated method's own Visibility as Public even when the derived-on struct and every function touching it are fully private (verified previously with a throwaway private-Widget variant of this fixture), which trips roots.rs's `all_ancestors_public` fallback. Both over-report toward LIVE, which is the safe direction, and roots.rs may not be tightened until family B's remaining desugaring gaps close -- see the handover's standing 'never widen roots to make something green' principle, which applies symmetrically to narrowing them early.\n\nTHIS FIXTURE IS NOT FATAL COVERAGE AND MUST NOT BE MISTAKEN FOR IT. Because the node is always considered reachable (see the root over-reporting above), the reachability comparison this harness performs can never disagree with rustc about it, so `fatal` is empty here by construction. The real regression guard for Family F is `main::non_local_paths`, which refuses the entire run if any emitted `file`/`site_file` is absolute -- exercised by this fixture only in the sense that a regression in `relocate_out_of_root` would turn this fixture's run into a refusal rather than a FATAL.",
+  "fatal": [],
+  "summary": {
+    "considered": 1,
+    "excluded": 1,
+    "agree_dead": 0,
+    "agree_live": 1,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 1,
+    "excluded": 1,
+    "agree_dead": 0,
+    "agree_live": 1,
+    "fatal": 0
+  }
+}

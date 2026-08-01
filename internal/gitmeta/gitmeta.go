@@ -13,12 +13,23 @@ import (
 // Load reads the short HEAD sha and dirty state of the repo. Tree is the sha,
 // suffixed "-dirty" when the working tree has uncommitted changes — so a map
 // computed against a dirty tree is never mistaken for one pinned to a commit.
-func Load(repo string) (contract.Meta, error) {
+// Any repo-relative paths in ignore are excluded from the dirty check — magma
+// passes the artifact it writes into the repo so its own output never makes
+// the NEXT run see a dirty tree (which would flip the deterministic tree
+// stamp and defeat freshness). A real source change is still reported dirty.
+func Load(repo string, ignore ...string) (contract.Meta, error) {
 	sha, err := gitOut(repo, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return contract.Meta{}, err
 	}
-	status, err := gitOut(repo, "status", "--porcelain")
+	statusArgs := []string{"status", "--porcelain"}
+	if len(ignore) > 0 {
+		statusArgs = append(statusArgs, "--", ".")
+		for _, p := range ignore {
+			statusArgs = append(statusArgs, ":(exclude)"+p)
+		}
+	}
+	status, err := gitOut(repo, statusArgs...)
 	if err != nil {
 		return contract.Meta{}, err
 	}

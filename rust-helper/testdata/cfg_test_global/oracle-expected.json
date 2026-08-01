@@ -1,0 +1,21 @@
+{
+  "adjudication": "family-e-fixed",
+  "fatal": [],
+  "summary": {
+    "considered": 3,
+    "excluded": 1,
+    "agree_dead": 0,
+    "agree_live": 3,
+    "fatal": 0
+  },
+  "executed_target_code": true,
+  "note": "Family E (Phase B, Task E): main.rs now runs TWO workspace loads -- cfg(test) off (production) and cfg(test) on (test) -- and merges them by (file, line, column, symbol) identity, mirroring Go's two-`packages.Load` architecture. `real_clock` (`#[cfg(not(test))] pub fn`) is now enumerated by the cfg(test)-off pass regardless of the cfg(test)-on pass's own view, so its edge to `clock_helper` survives the merge and both are correctly live. `considered` moved 2 -> 3 because `real_clock` is now a node at all (previously silently absent, not merely misclassified). This fixture's `tests::uses_it` workaround was investigated for removal and found still load-bearing, for a DIFFERENT reason than the original defect: oracle-diff.sh's plain-config oracle pools diagnostics from BOTH sub-compilations `cargo check --all-targets` triggers (the normal build AND the implicit cfg(test)-on unittests build) into one dead-span set. Without `tests::uses_it`, if this fix ever regressed, the cfg(test)-on sub-compilation would independently (and accidentally) report `clock_helper` dead too, so both sides would agree \"dead\" (SUMMARY's `agree_dead`, not `fatal`) and the regression would NOT surface as a FATAL -- `report_only` isn't gated by oracle-gate.sh, only `considered/excluded/agree_dead/agree_live/fatal` are. Verified directly: with `tests::uses_it` removed, oracle-gate.sh against the FIXED binary shows `report_only:1, fatal:0` (safe -- helper says live, oracle's polluted view says dead), but against the PRE-fix binary the exact same simplified fixture instead shows `agree_dead:1, fatal:0` -- the accidental-agreement masking the original doc comment already predicted, now reproduced. Kept in place; not a fixture that outlived its purpose.",
+  "fatal_test": [],
+  "summary_test": {
+    "considered": 4,
+    "excluded": 0,
+    "agree_dead": 0,
+    "agree_live": 4,
+    "fatal": 0
+  }
+}

@@ -59,3 +59,78 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
+
+  # The Rust helper had NO CI at all: the jobs above gate gofmt, go vet and the
+  # Go tests, and nothing ever built rust-helper or ran its oracle gate. That
+  # gate is the branch's primary correctness instrument — it is what catches
+  # false dead code — so leaving it to be run by hand meant the one check that
+  # matters most was the one nothing enforced.
+  rust-helper:
+    name: rust helper (build + oracle gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-helper
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-src is NOT optional: the helper sets
+      # `sysroot = Some(RustLibSource::Discover)`, one of the five load-config
+      # facts the handover marks as load-bearing, and discovery needs the
+      # sysroot sources present. Without it every fixture refuses.
+      # Pinned to an immutable commit SHA, not the mutable `@stable` tag: a tag
+      # can be repointed by whoever controls the action, and this job runs with
+      # repository credentials. Flagged by SonarCloud (githubactions:S7637) on
+      # this workflow's first analysis.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt, clippy, rust-src
+
+      # The ra_ap_* dependency tree is very large and pinned at =0.0.343, so a
+      # cold build dominates this job. The pin makes the cache key stable.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust-helper
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      # A real gate, not a report. The tree was carrying five lints when this
+      # job was written; two were fixed properly (CargoConfig built as an
+      # initializer instead of post-construction assignment) and three carry an
+      # explicit `#[allow]` with a written reason at the site. An allow a
+      # reviewer can see and argue with beats a `continue-on-error` that
+      # silently tolerates everything, including the next lint nobody meant to
+      # add.
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # --locked on every dependency-resolving step: without it cargo may UPDATE
+      # Cargo.lock rather than fail, so CI could silently build against different
+      # versions than the committed lock. That matters more here than usual — the
+      # `ra_ap_* = 0.0.343` pin is load-bearing, those crates break across patch
+      # releases. Flagged by SonarCloud (githubactions:S8549).
+      - name: build
+        run: cargo build --locked --release
+
+      - name: cargo test
+        run: cargo test --locked --release
+
+      # The real gate. Every fixture is compared against rustc's own dead_code
+      # lint in both configs, and its FATAL set must match its committed
+      # baseline EXACTLY — a new FATAL fails, and so does a baselined one that
+      # vanishes, since a disappearing FATAL usually means an exclusion silently
+      # widened. Runs every fixture and reports all failures rather than
+      # stopping at the first, so one broken baseline does not mask others.
+      - name: oracle fixture gate
+        run: |
+          failed=""
+          for f in testdata/*/oracle-expected.json; do
+            d="$(dirname "$f")"; n="$(basename "$d")"
+            if scripts/oracle-gate.sh "$d"; then
+              echo "::notice::oracle gate PASS $n"
+            else
+              echo "::error::oracle gate FAIL $n"; failed="$failed $n"
+            fi
+          done
+          [ -z "$failed" ] || { echo "::error::fixtures failed:$failed"; exit 1; }

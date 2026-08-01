@@ -71,6 +71,63 @@ func TestLoadCommitDate(t *testing.T) {
 	}
 }
 
+// The generated artifact magma writes into a target repo must not itself flip
+// the tree stamp to dirty on the next run (that would defeat freshness and
+// break determinism) — but a real source change must still register as dirty
+// even with the artifact ignored.
+func TestLoadIgnoresGeneratedArtifact(t *testing.T) {
+	repo := t.TempDir()
+	run := func(args ...string) {
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if err := c.Run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init")
+	run("config", "user.email", "t@t.t")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "a.go"), []byte("package m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "a.go")
+	run("commit", "-m", "init")
+
+	// Untracked generated artifact present.
+	if err := os.MkdirAll(filepath.Join(repo, "docs/architext/data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "docs/architext/data/code-graph.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, err := Load(repo) // no ignore -> sees the untracked artifact
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(dirty.Tree, "-dirty") {
+		t.Errorf("without ignore, tree = %q, want -dirty", dirty.Tree)
+	}
+	clean, err := Load(repo, "docs/architext/data/code-graph.json") // ignore it
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasSuffix(clean.Tree, "-dirty") {
+		t.Errorf("with the artifact ignored, tree = %q, want clean", clean.Tree)
+	}
+	// A REAL change must still register as dirty even with the ignore.
+	if err := os.WriteFile(filepath.Join(repo, "a.go"), []byte("package m\n// x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stillDirty, err := Load(repo, "docs/architext/data/code-graph.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(stillDirty.Tree, "-dirty") {
+		t.Errorf("a real source change must be dirty despite the ignore; tree = %q", stillDirty.Tree)
+	}
+}
+
 func run(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
