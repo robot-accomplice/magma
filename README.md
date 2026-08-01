@@ -56,6 +56,10 @@ a library and so cannot ship through `go install`:
 cargo install --path rust-helper   # from a magma checkout
 ```
 
+The helper is **not** part of the published GitHub Release — that archive carries the pure-Go
+`magma` binary only — and it is not on crates.io. Analyzing Rust therefore needs a checkout and a
+Rust toolchain even if you installed `magma` itself from a release archive or `go install`.
+
 magma finds it on `PATH`, or at `$MAGMA_RUST_HELPER`. Without it, a Rust repo is **refused** with
 an install hint rather than analyzed partially — magma returns an honest map or an honest refusal,
 never a degraded one.
@@ -121,7 +125,7 @@ This is the published vocabulary:
 | `semantic` | Rust | Edges come from rust-analyzer's name resolution and type inference, so a resolved call lands on the impl rustc would select. Desugared forms (operators, `for`, `await`, format args, `?`, `Drop`) resolve from types rather than syntax and are emitted `dynamic` — real over-approximations, never invented edges. |
 
 **Both are real call graphs.** Both over-approximate dynamic dispatch and never invent an edge, so
-every imprecision fails toward "live": a node either map calls dead is dead conservatively.
+every imprecision fails toward "live": a node that either map calls dead is dead conservatively.
 
 **The value is an OPEN set, not a closed enum.** magma adds a language per minor release and each
 may name its own fidelity. A consumer that branches on this field must therefore handle an
@@ -212,11 +216,28 @@ against small fixture modules, with an enforced **80% coverage floor**.
 Branching follows a modified gitflow: `feature/* → develop`, and `develop → main` at release
 time. Pushing a semver tag drives [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which re-runs the CI gates, verifies the tag matches the binary's version, cross-compiles every
-target (magma is pure Go), and publishes a checksummed GitHub Release.
+target (the `magma` binary is pure Go), and publishes a checksummed GitHub Release.
+
+Tags are **annotated** — the release is cut from `main` after the promotion PR merges:
 
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git tag -a vX.Y.Z -m "magma vX.Y.Z — <one-line summary>" && git push origin vX.Y.Z
 ```
+
+### Release checklist
+
+Run through this **before** pushing the tag; a tag is public the moment it lands.
+
+- **Audit the user-facing docs against what the release actually does** — this README and
+  [`rust-helper/README.md`](rust-helper/README.md). Supported languages, the refusal list, the flag
+  table, the roadmap line, and the example output all drift silently, and **nothing in CI catches a
+  README that lies**. This is the step most likely to be skipped and the only one a user sees.
+- **Confirm `version` in `main.go` matches the tag.** The release workflow hard-fails on a mismatch,
+  and it fails *in public*, after the tag exists.
+- **Remember `release.yml` runs the Go gates only.** The Rust oracle gate lives in `ci.yml`, so the
+  green `develop → main` PR is the last point Rust correctness is actually checked — not the tag.
+- **Check the release artifacts after publishing**, not just the workflow's exit status: the run can
+  succeed while the Release is a draft or missing a target.
 
 ## License
 
