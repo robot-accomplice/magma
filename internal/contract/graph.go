@@ -108,7 +108,7 @@ type Graph struct {
 	// THE NAME IS OPEN, NOT A CLOSED ENUM. magma adds a language per minor
 	// release and each may name its own fidelity, so a consumer must not fail
 	// closed on an unrecognised value — nor silently treat it as the weakest.
-	Fidelity        string `json:"fidelity"`
+	Fidelity string `json:"fidelity"`
 	// ExecutedTargetCode records whether producing this graph RAN the analysed
 	// repository's own code. Go never does: it type-checks only, so the Go
 	// backend leaves this false. The Rust backend does — rust-analyzer executes
