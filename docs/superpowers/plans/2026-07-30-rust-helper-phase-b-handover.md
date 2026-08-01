@@ -920,3 +920,86 @@ still stands on its own.
 **Not sent.** Transmitting this is an outward-facing action and is the user's to take. Everything
 needed is above; the process of sending a real emit for validation before wiring is three-for-three
 at catching defects pre-ship, so it is worth doing before release.
+
+---
+
+# ARCHITEXT VALIDATION ROUND — two defects, one contract decision (2026-08-01)
+
+The sample was sent, validated, and **failed**. Both defects were mine; both are fixed.
+
+## Defect 1 — `signature.params`/`results` emitted `null`, not `[]` (FIXED, `f3e1827`)
+
+Architext's validator rejected the artifact outright. Measured across 10,921 functions: 7,442
+null params (68%), 5,456 null results (50%), 2,326 with ONE null and one array — the last being the
+tell that it was per-field, i.e. a nil Go slice, not a whole-object switch.
+
+**`golang.go`'s `signatureOf` had always initialised both fields explicitly. I wrote the Rust
+mapping fresh as `&contract.Signature{}` and appended, so a no-parameter function left a nil slice,
+which Go marshals as `null`.** The invariant lived in one backend's code instead of in the type, so
+the second backend did not inherit it.
+
+Fixed in `contract.Signature.MarshalJSON`, which coerces nil to `[]` — structurally impossible for
+any backend to get wrong now, rather than relying on the next author noticing what `signatureOf`
+does. Mutation-checked. Re-emit converted the populations exactly: 7,442 / 5,456 / 5,286 null →
+the identical counts as `[]`.
+
+Architext declined to relax their schema to accept `null`, correctly: "unknown parameters" and "no
+parameters" are different claims and only the second can be true of a function magma has analysed.
+
+## Defect 2 — the re-emit silently did nothing
+
+The first re-emit hit magma's freshness check and skipped. **Freshness is keyed on the ANALYSED
+repo's sha, not on magma's own version** — `roboticus-rust` had not changed, though magma had, which
+was the entire point. `--force` is required when regenerating a sample after a magma-side fix.
+Caught only by validating the file rather than the run's exit code. Add `--force` to any
+sample-regeneration step.
+
+## Contract decision — `kind: "init"` added to the enum (two-sided, Architext landing it)
+
+274 nodes (2.5%) carry `kind: "init"`, which violated their `{"enum":["func","method"]}`. This is
+the governance rule earning its keep: `fidelity` is `{"type":"string"}` on their side so
+`"semantic"` shipped one-sided, while `kind` is pinned — **same "new value on an existing field"
+shape, opposite governance, decided entirely by how the CONSUMER constrains the field.** Neither
+side could know without checking.
+
+**Decided (b): add `"init"`, do not map to `"func"`.** The concrete reason, measured rather than
+argued — the 22 init nodes landing in the dead badge are `static`s:
+
+    ENV_MUTEX#init        test_support.rs:4
+    TEST_NONCE#init       dashboard.rs:91
+    MACHINE_ID_MUTEX#init keystore.rs:689
+
+Mapping to `"func"` would render `ENV_MUTEX#init` as a dead FUNCTION, sending a reader to delete a
+function that does not exist. That is an actionable wrong answer, 22 times.
+
+**What the 274 actually buy, measured:** 4 edges, 1 distinct callee, and exactly **1** function
+(`PatternSet::compile`, injection.rs:36) reachable ONLY via an init edge. One false dead-code row
+prevented out of 10,921 nodes. Small, and still worth it — a false dead-code row is a deletion
+order for live code. Option (c), dropping the nodes, would mechanically reintroduce it.
+
+**Go/Rust asymmetry, deliberate — do not "fix" it.** Go's `init#N` stays `kind: "func"` because it
+IS a real function (compiler-generated, has a body, called by the runtime). Rust's `#init` is a
+magma-synthesized node wrapping an initialiser EXPRESSION; there is no `fn` in the source. Same
+name, different things, correctly different kinds.
+
+## Disclosed to Architext, not fixed: magma models calls, not uses
+
+Those 22 land in `dead` rather than `test_only` because a `static` is *used*, never *called*, so no
+edge ever points at its initialiser. A test-support static therefore has no incoming edge, fails
+`reachable`, and drops into the dead badge despite `test: true`. A "uses" edge is a real design
+question, not a patch — flagged rather than papered over, because Architext is about to render
+these and the confidence they present them with should reflect it.
+
+## Third independent badge reconciliation
+
+Architext's predicates give dead=59 / test_only=21 against magma's 59 / 21 on the fixed Rust emit —
+after Go, and after the pre-fix Rust emit. Different language backend, different analysis semantics,
+same numbers.
+
+## The standing lesson, now confirmed from both sides
+
+> **When a component copes with a missing guarantee locally, the coping is what stops anyone
+> noticing the contract cannot.** Go's backend coped by initialising the slices itself, which is why
+> nothing noticed `contract.Signature` had no such guarantee. `oracle-diff.sh` coped with the
+> missing `#[test]` signal via a source regex, and with `#[no_mangle]` via an exclusion, which is why
+> neither gap was visible until a second consumer existed. Four instances, two on each side.
