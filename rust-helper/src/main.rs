@@ -66,8 +66,30 @@ fn main() -> anyhow::Result<()> {
     let executed_target_code = load_config.load_out_dirs_from_check
         && load_config.with_proc_macro_server != ProcMacroServerChoice::None;
 
-    // Same absolute-path computation load_workspace_at uses internally, so
-    // stripping this prefix from vfs paths yields a repo-relative path.
+    // CANONICALISED, and every later path must derive from this one.
+    //
+    // `cargo metadata` reports `target_directory` canonicalised (symlinks
+    // resolved); rust-analyzer's vfs reports paths as given. If the root
+    // contains a symlink the two silently disagree and NOTHING under
+    // `target/` matches the target-dir prefix any more — so build-script
+    // output gets scanned as if it were workspace source, and the `generated`
+    // flag (the H1 fix, which anchors on the same directory) stops firing for
+    // exactly the code it exists to catch.
+    //
+    // Found by running against a Bevy project at `/tmp/...`, where macOS
+    // resolves `/tmp` -> `/private/tmp`: magma REFUSED the workspace over type
+    // errors in `target/debug/build/clang-sys-*/out/*.rs`, generated files it
+    // should never have looked at. Not exotic — `/tmp` and `/var` are
+    // symlinked on macOS, and symlinked checkouts are ordinary on CI.
+    //
+    // Canonicalising here alone would not be enough: `load_workspace_at` below
+    // is handed the path too, and if IT saw the uncanonical form the vfs paths
+    // would no longer strip against this root, every node would emit an
+    // absolute path, and `non_local_paths` would refuse the whole run. So the
+    // canonical form is computed once and used for BOTH.
+    let root_canonical = std::fs::canonicalize(&root)
+        .map_err(|e| anyhow::anyhow!("cannot resolve workspace root {root:?}: {e}"))?;
+    let root = root_canonical.to_string_lossy().into_owned();
     let root_abs = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(&root));
     // H1 fix: the workspace's own target directory, used to anchor the
     // `generated` heuristic instead of an unanchored substring match (see
