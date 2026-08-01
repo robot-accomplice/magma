@@ -7,12 +7,15 @@
 > the findings were reached: useful for *why*, misleading for *what is true now*.
 >
 > One-line status: Phase B closed the oracle pipeline, all five contract defects, and **all six
-> families A–F**, including the `?` and `Drop` desugaring gaps. The Rust backend is WIRED.
-> 15/15 rust fixtures pass; Go suite and golangci-lint green.
-> **Remaining: a runtime measurement on a quiet machine, a fresh adversarial review, and Rust CI.**
-> Per the user: **the release does not happen until all of it is done.**
+> families A–G** (G found by the post-wiring review), including the `?` and `Drop` desugaring gaps.
+> The Rust backend is WIRED. 16/16 rust fixtures pass; Go suite, golangci-lint and clippy green.
+> Runtime measured and cut 28%. Adversarial review done (found family G). Rust CI added.
+> First Rust artifact VALIDATES CLEAN with Architext.
+> **Remaining before release: the Rust CI job has never actually executed, and the structural-debt
+> task should land before the next family.** Per the user: **the release does not happen until all
+> of it is done.**
 
-**Originally written 2026-07-30 at `df8cba4`. Code complete and wired through `bd33377`.**
+**Originally written 2026-07-30 at `df8cba4`. Code complete and wired; Architext-validated at `84fe9b4`.**
 
 Read this with `docs/superpowers/plans/2026-07-29-rust-helper.md` — specifically its final section,
 "Plan A outcome: DO NOT SHIP", which is the authoritative finding list. This document is the
@@ -1003,3 +1006,36 @@ same numbers.
 > nothing noticed `contract.Signature` had no such guarantee. `oracle-diff.sh` coped with the
 > missing `#[test]` signal via a source regex, and with `#[no_mangle]` via an exclusion, which is why
 > neither gap was visible until a second consumer existed. Four instances, two on each side.
+
+## CLOSED — first Rust artifact validates clean (2026-08-01)
+
+    Architext validation passed.   (10,921 functions, 24,611 calls, 608 modules)
+
+`kind` enum is now `["func","method","init"]` on their side (their commit `6a40d06`), RED confirmed
+before with magma's exact error text, GREEN after, their full workspace clean. **`init` may be
+emitted freely.** No further coordination outstanding on the Rust artifact.
+
+**They put the Go/Rust asymmetry warning in the code, not in a ledger** — verbatim in the enum's own
+test doc comment, on the reasoning that "a ledger is not where someone stands when they're about to
+tidy up an enum." Worth copying as a habit: the warning belongs where the mistake would be made.
+
+**The calls-vs-uses disclosure changed their rendering.** They recorded it as a rendering
+constraint rather than trivia: a `static`'s initialiser can never receive an edge, so those nodes
+carry *weaker evidence than a function in the same badge*, and their UI will not present them with
+equal confidence. They explicitly distinguished it from their generic reflection/cgo caveat because
+the blind spot has a **structural** cause rather than a heuristic one. Disclosing a weakness in our
+own data is what let them render it honestly — and they did not ask us to build a "uses" edge.
+
+**Five defects caught pre-ship by this handshake**, across both sides: `tree` carrying the SHA,
+`executed_target_code` vs `additionalProperties:false`, their own `fidelity` minLength,
+`signature.*: null`, and `kind: "init"` — the last a contract gap rather than a bug, surfaced only
+because fixing the previous one unmasked it.
+
+**Their sharper formulation of the standing lesson, which supersedes mine:**
+
+> **Local competence is what makes a missing guarantee invisible — the healthier the component, the
+> longer nobody looks.**
+
+Every one of the four cases fits it: `golang.go` initialising its own slices, `oracle-diff.sh`'s
+`#[test]` regex and `#[no_mangle]` exclusion, and their own validator passing a document whose
+`fidelity` was nonsense. In each, the coping component was working perfectly.
