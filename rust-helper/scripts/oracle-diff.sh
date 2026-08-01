@@ -158,6 +158,17 @@ run_oracle_check() {
   local stderr="$WORK/cargo-$label.stderr"
 
   echo "== running oracle ($label config: cargo check --workspace --all-targets $* -v) on $REPO_ABS ==" >&2
+  # --color=never is REQUIRED, not cosmetic: the freshness check below parses
+  # cargo's human-readable progress lines, and its awk pattern anchors at the
+  # start of the line. When cargo emits ANSI colour the line starts with an
+  # escape sequence instead of whitespace, NOTHING matches, every workspace
+  # crate reads as never-recompiled, and the harness refuses a perfectly good
+  # run. That is exactly what happened on this job's first CI run: locally
+  # cargo auto-disables colour when stderr is redirected to a file, but
+  # `dtolnay/rust-toolchain` sets CARGO_TERM_COLOR=always, so it stayed on and
+  # all 16 fixtures refused. An explicit flag beats depending on ambient env
+  # for a correctness-critical parse.
+  #
   # -v (verbose) makes cargo print one "Fresh <pkg>" / "Compiling <pkg>" /
   # "Checking <pkg>" progress line per unit to stderr, alongside the JSON
   # stream on stdout. This is the ONLY reliable signal for "did rustc
@@ -173,7 +184,7 @@ run_oracle_check() {
   # helper's enumeration scope, rather than narrowing the comparison with a
   # new exclusion. This applies identically to the test-config run.
   set +e
-  ( cd "$REPO_ABS" && cargo check --workspace --all-targets "$@" -v --message-format=json 2>"$stderr" ) \
+  ( cd "$REPO_ABS" && cargo check --workspace --all-targets "$@" -v --color=never --message-format=json 2>"$stderr" ) \
     > "$jsonl"
   local cargo_rc=$?
   set -e
