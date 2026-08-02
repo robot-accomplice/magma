@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/magma-dark.svg">
+  <img alt="" width="48" height="48" src="docs/assets/magma-light.svg">
+</picture>
+
 # magma
 
 [![CI](https://github.com/robot-accomplice/magma/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/magma/actions/workflows/ci.yml)
