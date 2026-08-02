@@ -2,6 +2,7 @@ package contract
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -122,8 +123,49 @@ type Graph struct {
 	ExecutedTargetCode  bool   `json:"executed_target_code"`
 	Computable          bool   `json:"computable"`
 	NotComputableReason string `json:"not_computable_reason,omitempty"`
-	Nodes               []Node `json:"nodes"`
-	Edges               []Edge `json:"edges"`
+	// Limitations declares what this backend cannot do, upfront and ahead of any
+	// row. Present even on a refusal — a refusal is exactly when a consumer most
+	// needs to know what the backend cannot do. See limitations.go for why scope
+	// and effect are open strings rather than enums.
+	Limitations Limitations `json:"limitations"`
+	// Disclosure is what THIS run measured. Nil (and omitted) on a refusal,
+	// because there is no graph to measure and a zeroed count block would read
+	// as "measured, and everything was zero".
+	Disclosure *Disclosure `json:"disclosure,omitempty"`
+	Nodes      []Node      `json:"nodes"`
+	Edges      []Edge      `json:"edges"`
+}
+
+// Finalize attaches the per-run Disclosure. It is derived from the finished
+// graph rather than computed by each backend, so the counts mean exactly the
+// same thing for Go, Rust and every later language, and a new backend cannot
+// forget to produce them — the metric arrives free.
+//
+// This is the same reasoning as Signature.MarshalJSON: an invariant implemented
+// per-backend did not survive the second backend, so it belongs in one place.
+func (g Graph) Finalize() Graph {
+	if !g.Computable {
+		return g
+	}
+	d := Disclosure{Nodes: len(g.Nodes)}
+	for _, n := range g.Nodes {
+		if n.Root {
+			d.Roots++
+		}
+		if n.Generated {
+			d.Generated++
+		}
+	}
+	for _, e := range g.Edges {
+		if e.Kind == "dynamic" {
+			d.DynamicEdges++
+		}
+	}
+	if d.Nodes > 0 {
+		d.RootRatio = math.Round(float64(d.Roots)/float64(d.Nodes)*1000) / 1000
+	}
+	g.Disclosure = &d
+	return g
 }
 
 // NewGraph seeds an envelope from provenance and language; the backend fills
@@ -173,6 +215,7 @@ const noProdMain = "no production main in scope; reachability not computable"
 // definition; generated code is intentionally not hand-audited for deadness).
 func (g Graph) DeadView(m Meta) Note {
 	m.Fidelity = g.Fidelity
+	m.Limitations = g.Limitations
 	if !g.Computable {
 		return m.Refused(g.NotComputableReason)
 	}
@@ -196,6 +239,7 @@ func (g Graph) DeadView(m Meta) Note {
 // no-production-main scope for the same reason as DeadView.
 func (g Graph) TestOnlyView(m Meta) Note {
 	m.Fidelity = g.Fidelity
+	m.Limitations = g.Limitations
 	if !g.Computable {
 		return m.Refused(g.NotComputableReason)
 	}

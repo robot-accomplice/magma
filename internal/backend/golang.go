@@ -42,6 +42,9 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta, progress Progress) 
 		}
 	}
 	g := contract.NewGraph(meta, "go", "rta")
+	// Set before any refusal path below: a refusal is exactly when a consumer
+	// most needs to know what this backend cannot do.
+	g.Limitations = goLimitations()
 
 	// Two loads, deliberately — the same design deadcode uses. A single Tests:true
 	// load creates duplicate SSA variants of each package ("p" and "p [p.test]"),

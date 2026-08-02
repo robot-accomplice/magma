@@ -60,6 +60,9 @@ func (rustBackend) BuildGraph(repo string, meta contract.Meta, progress Progress
 		}
 	}
 	g := contract.NewGraph(meta, "rust", "semantic")
+	// Set before any refusal path below: a refusal is exactly when a consumer
+	// most needs to know what this backend cannot do.
+	g.Limitations = rustLimitations()
 
 	// Cargo has no single identifier analogous to a go.mod module path — a
 	// workspace is a set of independently-named crates — so the repo's own

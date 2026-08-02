@@ -137,6 +137,36 @@ value instead.
 (The field lives in the JSON for tooling; the terminal panel and the notes don't repeat it in
 jargon a human has to look up.)
 
+### `limitations` — what a backend cannot do
+
+Every artifact declares its backend's known limitations upfront, ahead of any row, and every
+refusal names **who** cannot do the thing. The attribution is the useful part: it tells you
+whether waiting helps.
+
+| scope | meaning | moves? |
+|---|---|---|
+| `language` | inherent to the analysed language | never |
+| `analyzer` | the pinned analyser's limit | when the pin moves |
+| `backend` | magma has not built it yet | we can fix it |
+
+`effect` names which way a limitation errs: **`over-approximates-live`** (findings suppressed —
+the map may report *fewer* dead functions than exist), `may-omit-edges`, `may-omit-nodes`.
+
+**Both are OPEN sets, not closed enums**, for the same reason as `fidelity`, and the lesson was
+learned expensively: a pinned enum elsewhere in this contract made a 15 MB artifact wholly
+invalid the moment one new value appeared. A consumer must treat an unrecognised `scope` or
+`effect` as one unknown annotation — never as grounds to reject the artifact.
+
+Alongside it, `disclosure` reports what **this run** measured: `nodes`, `roots`, `generated`,
+`dynamic_edges`, and `root_ratio`.
+
+**`root_ratio` is the one to watch.** A high ratio means most of the graph is an entry point, so
+few functions *can* be reported dead — and a small `_dead` set is then absence of evidence
+rather than evidence of absence. Measured on a real derive-heavy Rust crate: 136 of 156 nodes
+rooted (0.872) and **zero** dead functions reported. Every number was accurate, and a consumer
+computing `dead = !reachable && !root` rendered it as a clean bill of health. That is the
+failure this field exists to make visible.
+
 Regenerating a map **reconciles** the notes: any markdown file the previous run wrote that
 the new render no longer lists (a function that was deleted, say) is removed. A note you
 wrote by hand, that magma never generated, is never touched.
@@ -177,8 +207,9 @@ magma exits non-zero and writes a refused (but present) set of files when it can
 behind a map:
 
 - **Unsupported / unknown language.** Go and Rust are supported; other languages are detected and
-  refused. Support lands one language per minor release — **v0.3.0 is the JavaScript family
-  (TypeScript, Node, Next, React)**.
+  refused. Support lands one language per minor release — **v0.4.0 is the JavaScript family
+  (TypeScript, Node, Next, React)**. v0.3.0 is a contract release and adds no language: each
+  minor is one substantial change, and language support lands one per minor.
 - **Rust helper not installed.** A Rust repo is refused, with the install command, when
   `magma-rust-helper` is on neither `PATH` nor `$MAGMA_RUST_HELPER`.
 - **No production `main` in scope.** A library or a single-package scope has no external-caller

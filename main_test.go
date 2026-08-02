@@ -425,7 +425,7 @@ func TestReport(t *testing.T) {
 // missing manifest (a JSON-only folder from an older run), or a manifest
 // listing a deleted note all force a rebuild.
 func TestIsFresh(t *testing.T) {
-	const gen = "magma/0.2.0"
+	const gen = "magma/0.3.0"
 	cases := []struct {
 		name         string
 		storeTree    string
@@ -491,14 +491,14 @@ func TestIsFreshRequiresArchitextWhenRequested(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeJSONFile(t, filepath.Join(dataDir, "graph.json"),
-		map[string]any{"tree": "abc123", "generator": "magma/0.2.0", "computable": true})
+		map[string]any{"tree": "abc123", "generator": "magma/0.3.0", "computable": true})
 	writeJSONFile(t, filepath.Join(dataDir, "_dead.json"), map[string]any{"tree": "abc123"})
 	writeJSONFile(t, filepath.Join(dataDir, "_test-only.json"), map[string]any{"tree": "abc123"})
 	writeJSONFile(t, filepath.Join(dataDir, "manifest.json"), []string{"Overview.md"})
 	if err := os.WriteFile(filepath.Join(out, "Overview.md"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	meta := contract.Meta{Tree: "abc123", Generator: "magma/0.2.0"}
+	meta := contract.Meta{Tree: "abc123", Generator: "magma/0.3.0"}
 
 	if !isFresh(out, meta, false) {
 		t.Error("map should be fresh when architext isn't requested")
