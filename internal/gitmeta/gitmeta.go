@@ -6,12 +6,13 @@ package gitmeta
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
-
-	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/robot-accomplice/magma/internal/contract"
 )
@@ -124,19 +125,45 @@ func pathspec(ignore []string) []string {
 	return out
 }
 
+// gitBin resolves the git executable ONCE to an absolute path.
+//
+// Two reasons, and the linter's is the lesser one. Resolving up front turns a
+// missing git into a single clear error instead of an opaque exec failure on
+// whichever call happened to run first. And it pins the binary for the whole
+// run: without it every invocation re-consults PATH, so a PATH entry that is
+// writable mid-run could substitute a different executable between calls
+// (go:S4036).
+//
+// LookPath still consults PATH — this does not make a hostile PATH safe, and
+// claiming otherwise would be the kind of security theatre this project avoids.
+// What it does is make the resolution explicit, singular, and auditable.
+var gitBin = sync.OnceValues(func() (string, error) {
+	p, err := exec.LookPath("git")
+	if err != nil {
+		return "", fmt.Errorf("git not found on PATH: %w", err)
+	}
+	return p, nil
+})
+
 // gitRaw returns git's stdout unmodified. Hashing needs the exact bytes:
 // gitOut trims surrounding whitespace, which would erase a real difference
 // between two working-tree states.
+//
+// This is the package's only process invocation; gitOut wraps it rather than
+// duplicating it, so there is one place to harden rather than two that must be
+// kept in step.
 func gitRaw(repo string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	bin, err := gitBin()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = repo
 	return cmd.Output()
 }
 
 func gitOut(repo string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repo
-	out, err := cmd.Output()
+	out, err := gitRaw(repo, args...)
 	if err != nil {
 		return "", err
 	}
