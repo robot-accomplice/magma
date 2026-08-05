@@ -25,12 +25,20 @@ type CodeGraph struct {
 	// Declared by Architext ahead of magma emitting it (their
 	// code_graph_accepts_magmas_forthcoming_fields test), so adding it is
 	// already-coordinated rather than a new two-sided change.
-	ExecutedTargetCode  bool         `json:"executed_target_code"`
-	NotComputableReason string       `json:"not_computable_reason,omitempty"`
-	Functions           []Function   `json:"functions"`
-	Calls               []Call       `json:"calls"`
-	Modules             []Module     `json:"modules"`
-	ModuleCalls         []ModuleCall `json:"module_calls"`
+	ExecutedTargetCode bool `json:"executed_target_code"`
+	// Limitations and Disclosure were acked by Architext on 2026-08-01 as one
+	// two-sided release on their side. Limitations is CONSUMED, not merely
+	// stored: their viewer uses effect=over-approximates-live to say "these
+	// counts are suppressed by a known limitation" rather than rendering zero
+	// dead functions as a clean result — which is what it did on a derive-heavy
+	// Rust crate before this field existed.
+	Limitations         contract.Limitations `json:"limitations"`
+	Disclosure          *contract.Disclosure `json:"disclosure,omitempty"`
+	NotComputableReason string               `json:"not_computable_reason,omitempty"`
+	Functions           []Function           `json:"functions"`
+	Calls               []Call               `json:"calls"`
+	Modules             []Module             `json:"modules"`
+	ModuleCalls         []ModuleCall         `json:"module_calls"`
 }
 
 // Function is one node in the fine tier.
@@ -87,6 +95,9 @@ func Emit(g contract.Graph) CodeGraph {
 		Language: g.Language, Module: g.Module, SHA: g.SHA, Tree: treeState(g.Tree),
 		Fidelity: g.Fidelity, Computable: g.Computable, NotComputableReason: g.NotComputableReason,
 		ExecutedTargetCode: g.ExecutedTargetCode,
+		// Set in the initial literal, before the !Computable early return below,
+		// so a refused artifact still declares what the backend cannot do.
+		Limitations: g.Limitations, Disclosure: g.Disclosure,
 	}
 	if !g.Computable {
 		return cg // nil Functions/Calls/Modules/ModuleCalls

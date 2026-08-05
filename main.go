@@ -41,7 +41,7 @@ import (
 )
 
 // version tracks language support, not the data contract: 0.1.x == complete Go.
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	opt := parseArgs(os.Args[1:])
@@ -426,6 +426,10 @@ func emitReport(out, dataDir, repo string, meta contract.Meta, name string, g co
 // subfolder) and returns the two views so the caller can report on them without
 // re-deriving.
 func writeArtifacts(dataDir string, meta contract.Meta, g contract.Graph) (dead, testOnly contract.Note, err error) {
+	// Attach the per-run disclosure BEFORE deriving the views, so graph.json and
+	// the two row files describe the same run. Derived here rather than in each
+	// backend so the counts mean the same thing for every language.
+	g = g.Finalize()
 	dead = g.DeadView(meta)
 	testOnly = g.TestOnlyView(meta)
 	if err = contract.WriteGraph(dataDir, g); err != nil {
