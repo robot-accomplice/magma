@@ -210,9 +210,26 @@ working tree is dirty. On a skip, only `Overview.md`'s "Last validated" stamp is
 re-analysis. That makes it safe and near-free to run before every task. Force a rebuild with
 `--force`.
 
-A `tree` ending in `-dirty` means the working tree had uncommitted changes when the map was
-built, so it can't be reproduced from its SHA. For an audit, run magma at the frozen HEAD and
-pin downstream artifacts to the `sha` it stamps.
+### `sha` — provenance you can actually resolve
+
+`sha` is the **full 40-character commit id**, not an abbreviation. `git rev-parse --short` picks
+its width from the repository's object count, so it differs between repos and grows for one repo
+over time — a provenance field whose width drifts cannot be compared literally, and cannot be
+byte-identical across runs.
+
+**On a dirty tree, `sha` becomes `<sha>+<diffhash>`.** A map built from a dirty tree came from that
+commit *plus* uncommitted changes, so pinning to the bare commit records a boundary you cannot
+return to — and in practice those are exactly the commits that stop resolving, because in-flight
+work gets amended or rebased away. The composite **fails closed**: it cannot be mistaken for a git
+object, so a consumer that tries to resolve it errors instead of silently recording an unreachable
+boundary. It is also *distinguishable* — two dirty runs at the same commit over different code no
+longer stamp identically.
+
+The suffix is a **content** hash, not a timestamp, so re-running against an untouched dirty tree
+reproduces the same id exactly. Clean trees are unchanged, and `tree` keeps the bare commit with
+its `-dirty` marker.
+
+For an audit, still run magma at a frozen HEAD: a clean `sha` is the only one that round-trips.
 
 ### Refusals
 
