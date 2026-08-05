@@ -34,8 +34,12 @@ func TestLoadDirtyTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if meta.Tree != meta.SHA+"-dirty" {
-		t.Errorf("dirty tree: Tree = %q, want %q", meta.Tree, meta.SHA+"-dirty")
+	// Tree keeps the BASE sha; SHA carries the +diffhash. Deliberate: one
+	// identity field changing shape is easier for a consumer to absorb than
+	// two, and `tree`'s job is only the clean/dirty bit.
+	base, _, _ := strings.Cut(meta.SHA, "+")
+	if meta.Tree != base+"-dirty" {
+		t.Errorf("dirty tree: Tree = %q, want %q", meta.Tree, base+"-dirty")
 	}
 }
 
