@@ -5,14 +5,13 @@ use std::collections::HashMap;
 
 use ra_ap_hir::{
     Adt, AsAssocItem, AssocItem, AssocItemContainer, Crate, HasSource, Impl, ModuleDef,
-    PathResolution, ScopeDef, Semantics, Trait,
+    PathResolution, ScopeDef, Trait,
 };
 use ra_ap_ide_db::base_db::{CrateOrigin, LangCrateOrigin};
 use ra_ap_ide_db::RootDatabase;
-use ra_ap_paths::AbsPath;
 use ra_ap_syntax::{ast, AstNode, SyntaxNode};
-use ra_ap_vfs::Vfs;
 
+use crate::ctx::Ctx;
 use crate::enumerate;
 use crate::enumerate::InitSource;
 use crate::model;
@@ -86,13 +85,11 @@ struct Site {
 /// and a dynamic site is recorded as "static" — matching Go, where any static
 /// call site upgrades the pair.
 pub fn edges<'db>(
-    sema: &Semantics<'db, RootDatabase>,
-    db: &'db RootDatabase,
-    vfs: &Vfs,
-    root: &AbsPath,
+    cx: Ctx<'_, 'db>,
     funcs: &mut [(model::Function, ra_ap_hir::Function)],
     index: &HashMap<ra_ap_hir::Function, u32>,
 ) -> Vec<model::Call> {
+    let Ctx { db, sema, .. } = cx;
     let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
     // Whole-workspace lookup, so it is done once for the entire pass rather
     // than per function — see `local_drop_impls`.
@@ -127,17 +124,7 @@ pub fn edges<'db>(
             err_ty: err_ty.as_ref(),
             drop_glue: &drop_glue,
         };
-        walk(
-            sema,
-            body.syntax(),
-            &mut sites,
-            0,
-            db,
-            vfs,
-            root,
-            &mut truncated,
-            &ctx,
-        );
+        walk(cx, body.syntax(), &mut sites, 0, &mut truncated, &ctx);
         if truncated {
             node.macro_truncated = true;
         }
@@ -184,13 +171,11 @@ pub fn edges<'db>(
 /// the small "which bodies do I start from, and how do the ids materialise"
 /// wrapper differs between a real function and a synthesized initializer.
 pub fn init_edges<'db>(
-    sema: &Semantics<'db, RootDatabase>,
-    db: &'db RootDatabase,
-    vfs: &Vfs,
-    root: &AbsPath,
+    cx: Ctx<'_, 'db>,
     inits: &mut [(model::Function, InitSource)],
     index: &HashMap<ra_ap_hir::Function, u32>,
 ) -> Vec<model::Call> {
+    let Ctx { db, sema, .. } = cx;
     let mut agg: HashMap<(u32, u32), model::Call> = HashMap::new();
 
     for (node, src) in inits.iter_mut() {
@@ -216,17 +201,7 @@ pub fn init_edges<'db>(
                 let Some(body) = csrc.value.body() else {
                     continue;
                 };
-                walk(
-                    sema,
-                    body.syntax(),
-                    &mut sites,
-                    0,
-                    db,
-                    vfs,
-                    root,
-                    &mut truncated,
-                    &ctx,
-                );
+                walk(cx, body.syntax(), &mut sites, 0, &mut truncated, &ctx);
             }
             InitSource::Static(s) => {
                 let Some(ssrc) = s.source(db) else { continue };
@@ -234,17 +209,7 @@ pub fn init_edges<'db>(
                 let Some(body) = ssrc.value.body() else {
                     continue;
                 };
-                walk(
-                    sema,
-                    body.syntax(),
-                    &mut sites,
-                    0,
-                    db,
-                    vfs,
-                    root,
-                    &mut truncated,
-                    &ctx,
-                );
+                walk(cx, body.syntax(), &mut sites, 0, &mut truncated, &ctx);
             }
         }
         if truncated {
@@ -281,18 +246,15 @@ pub fn init_edges<'db>(
 /// through the recursion rather than recomputed per node for the same reason
 /// Family D threads `truncated`: they belong to the body this walk started
 /// from, and macro descent must not lose them.
-#[allow(clippy::too_many_arguments)]
 fn walk<'db>(
-    sema: &Semantics<'db, RootDatabase>,
+    cx: Ctx<'_, 'db>,
     node: &SyntaxNode,
     out: &mut Vec<Site>,
     depth: usize,
-    db: &'db RootDatabase,
-    vfs: &Vfs,
-    root: &AbsPath,
     truncated: &mut bool,
     ctx: &BodyCtx<'_, 'db>,
 ) {
+    let Ctx { db, sema, .. } = cx;
     if depth > MACRO_DEPTH_LIMIT {
         // Family D: this used to be silent — an expansion cut off here is
         // indistinguishable, from the caller's side, from one that simply
@@ -309,17 +271,7 @@ fn walk<'db>(
     for n in node.descendants() {
         if let Some(mc) = ast::MacroCall::cast(n.clone()) {
             if let Some(exp) = sema.expand_macro_call(&mc) {
-                walk(
-                    sema,
-                    &exp.value,
-                    out,
-                    depth + 1,
-                    db,
-                    vfs,
-                    root,
-                    truncated,
-                    ctx,
-                );
+                walk(cx, &exp.value, out, depth + 1, truncated, ctx);
             }
         }
         if let Some(call) = ast::CallExpr::cast(n.clone()) {
@@ -328,7 +280,7 @@ fn walk<'db>(
                     if let Some(PathResolution::Def(ra_ap_hir::ModuleDef::Function(f))) =
                         sema.resolve_path(&path)
                     {
-                        out.push(site(sema, &n, f, false, db, vfs, root));
+                        out.push(site(cx, &n, f, false));
                     }
                 }
             }
@@ -360,14 +312,14 @@ fn walk<'db>(
                     if let Some(PathResolution::Def(ra_ap_hir::ModuleDef::Function(f))) =
                         sema.resolve_path(&path)
                     {
-                        out.push(site(sema, &n, f, true, db, vfs, root));
+                        out.push(site(cx, &n, f, true));
                     }
                 }
             }
         }
         if let Some(mcall) = ast::MethodCallExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_method_call(&mcall) {
-                push_resolved(sema, &n, f, out, db, vfs, root);
+                push_resolved(cx, &n, f, out);
             }
         }
         // Family B: desugared calls. Each of these expression forms invokes a
@@ -386,22 +338,22 @@ fn walk<'db>(
         // there is nothing left for this call site to special-case.
         if let Some(bin) = ast::BinExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_bin_expr(&bin) {
-                push_resolved(sema, &n, f, out, db, vfs, root);
+                push_resolved(cx, &n, f, out);
             }
         }
         if let Some(prefix) = ast::PrefixExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_prefix_expr(&prefix) {
-                push_resolved(sema, &n, f, out, db, vfs, root);
+                push_resolved(cx, &n, f, out);
             }
         }
         if let Some(index) = ast::IndexExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_index_expr(&index) {
-                push_resolved(sema, &n, f, out, db, vfs, root);
+                push_resolved(cx, &n, f, out);
             }
         }
         if let Some(await_expr) = ast::AwaitExpr::cast(n.clone()) {
             if let Some(f) = sema.resolve_await_to_poll(&await_expr) {
-                push_resolved(sema, &n, f, out, db, vfs, root);
+                push_resolved(cx, &n, f, out);
             }
         }
         if let Some(try_expr) = ast::TryExpr::cast(n.clone()) {
@@ -420,7 +372,7 @@ fn walk<'db>(
             // A user's `impl From<E1> for E2` reached only via `?` is
             // therefore still open — see the Task B report.
             if let Some(f) = sema.resolve_try_expr(&try_expr) {
-                push_resolved(sema, &n, f, out, db, vfs, root);
+                push_resolved(cx, &n, f, out);
             }
             // ...and this closes it, by the same type-directed route format
             // args above takes rather than by resolving the (unreachable)
@@ -441,9 +393,7 @@ fn walk<'db>(
             // lookup drops the edge.
             if let Some(err_ty) = ctx.err_ty {
                 if let Some(from_trait) = core_trait(db, &["convert"], "From") {
-                    push_trait_method_edges(
-                        sema, &n, err_ty, from_trait, "from", out, db, vfs, root,
-                    );
+                    push_trait_method_edges(cx, &n, err_ty, from_trait, "from", out);
                 }
             }
         }
@@ -486,7 +436,7 @@ fn walk<'db>(
                     .and_then(|t| t.as_adt())
                 {
                     for drop_fn in ctx.drop_glue.get(&adt).into_iter().flatten() {
-                        out.push(site(sema, &n, *drop_fn, true, db, vfs, root));
+                        out.push(site(cx, &n, *drop_fn, true));
                     }
                 }
             }
@@ -524,7 +474,7 @@ fn walk<'db>(
                 .into_iter()
                 .flatten()
                 {
-                    push_trait_method_edges(sema, &n, &ty, trait_, "fmt", out, db, vfs, root);
+                    push_trait_method_edges(cx, &n, &ty, trait_, "fmt", out);
                 }
             }
         }
@@ -552,17 +502,7 @@ fn walk<'db>(
                     if let Some(into_iter_trait) =
                         core_trait(db, &["iter", "traits", "collect"], "IntoIterator")
                     {
-                        push_trait_method_edges(
-                            sema,
-                            &n,
-                            &src_ty,
-                            into_iter_trait,
-                            "into_iter",
-                            out,
-                            db,
-                            vfs,
-                            root,
-                        );
+                        push_trait_method_edges(cx, &n, &src_ty, into_iter_trait, "into_iter", out);
                         let into_iter_alias =
                             into_iter_trait
                                 .items(db)
@@ -581,17 +521,7 @@ fn walk<'db>(
                         if let Some(iterator_trait) =
                             core_trait(db, &["iter", "traits", "iterator"], "Iterator")
                         {
-                            push_trait_method_edges(
-                                sema,
-                                &n,
-                                &iter_ty,
-                                iterator_trait,
-                                "next",
-                                out,
-                                db,
-                                vfs,
-                                root,
-                            );
+                            push_trait_method_edges(cx, &n, &iter_ty, iterator_trait, "next", out);
                         }
                     }
                 }
@@ -609,20 +539,15 @@ fn walk<'db>(
 /// unresolved at this call site, a primitive, or a foreign type with no
 /// local impl to find anyway) yields no edge — a missed edge, not a
 /// false-dead one: the safe direction.
-/// `too_many_arguments`: same invariant-context threading as `walk` itself,
-/// which this is called from and shares parameters with.
-#[allow(clippy::too_many_arguments)]
 fn push_trait_method_edges<'db>(
-    sema: &Semantics<'db, RootDatabase>,
+    cx: Ctx<'_, 'db>,
     n: &SyntaxNode,
     ty: &ra_ap_hir::Type<'db>,
     trait_: Trait,
     method_name: &str,
     out: &mut Vec<Site>,
-    db: &RootDatabase,
-    vfs: &Vfs,
-    root: &AbsPath,
 ) {
+    let Ctx { db, .. } = cx;
     let Some(adt) = ty.as_adt() else { return };
     for imp in Impl::all_for_trait(db, trait_) {
         if imp.self_ty(db).as_adt() != Some(adt) {
@@ -631,7 +556,7 @@ fn push_trait_method_edges<'db>(
         for item in imp.items(db) {
             if let AssocItem::Function(f) = item {
                 if f.name(db).as_str() == method_name {
-                    out.push(site(sema, n, f, true, db, vfs, root));
+                    out.push(site(cx, n, f, true));
                 }
             }
         }
@@ -881,42 +806,34 @@ fn core_trait(db: &RootDatabase, path: &[&str], name: &str) -> Option<Trait> {
 /// direction); missing edges invent it. A concrete resolution (inherent impl,
 /// or a trait impl on a known concrete type) instead emits a single static
 /// edge to the exact target.
-fn push_resolved(
-    sema: &Semantics<'_, RootDatabase>,
-    n: &SyntaxNode,
-    f: ra_ap_hir::Function,
-    out: &mut Vec<Site>,
-    db: &RootDatabase,
-    vfs: &Vfs,
-    root: &AbsPath,
-) {
+fn push_resolved(cx: Ctx<'_, '_>, n: &SyntaxNode, f: ra_ap_hir::Function, out: &mut Vec<Site>) {
+    let Ctx { db, .. } = cx;
     match f.as_assoc_item(db).map(|assoc| assoc.container(db)) {
         Some(AssocItemContainer::Trait(t)) => {
-            out.push(site(sema, n, f, true, db, vfs, root));
+            out.push(site(cx, n, f, true));
             let name = f.name(db);
             for imp in Impl::all_for_trait(db, t) {
                 for item in imp.items(db) {
                     if let AssocItem::Function(impl_fn) = item {
                         if impl_fn.name(db) == name {
-                            out.push(site(sema, n, impl_fn, true, db, vfs, root));
+                            out.push(site(cx, n, impl_fn, true));
                         }
                     }
                 }
             }
         }
-        _ => out.push(site(sema, n, f, false, db, vfs, root)),
+        _ => out.push(site(cx, n, f, false)),
     }
 }
 
-fn site(
-    sema: &Semantics<'_, RootDatabase>,
-    n: &SyntaxNode,
-    to: ra_ap_hir::Function,
-    dynamic: bool,
-    db: &RootDatabase,
-    vfs: &Vfs,
-    root: &AbsPath,
-) -> Site {
+fn site(cx: Ctx<'_, '_>, n: &SyntaxNode, to: ra_ap_hir::Function, dynamic: bool) -> Site {
+    let Ctx {
+        db,
+        sema,
+        vfs,
+        root,
+        ..
+    } = cx;
     let range = sema.original_range(n);
     let file_id = range.file_id.file_id(db);
     // line_index is 0-based; magma reports 1-based (matches enumerate.rs).

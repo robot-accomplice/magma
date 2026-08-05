@@ -408,8 +408,15 @@ fn analyze_one_config(
     let t_walk = Instant::now();
     let (calls, init_nodes) = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
+        let cx = ctx::Ctx {
+            db,
+            sema: &sema,
+            vfs: &vfs,
+            root: root_abs.as_path(),
+            target_dir: target_dir_abs.as_path(),
+        };
         // `&mut funcs`: Family D adaptation, see the `mut` binding above.
-        let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &mut funcs, &index);
+        let mut calls = walk::edges(cx, &mut funcs, &index);
         eprintln!(
             "TIMING   walk (function bodies): {:.1}s for {} edges",
             t_walk.elapsed().as_secs_f64(),
@@ -435,7 +442,7 @@ fn analyze_one_config(
             funcs.len() as u32,
         );
         // `&mut inits`: Family D adaptation, same reason as `&mut funcs` above.
-        let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &mut inits, &index);
+        let init_edges = walk::init_edges(cx, &mut inits, &index);
         calls.extend(init_edges);
         let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
         eprintln!(
