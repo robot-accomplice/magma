@@ -165,7 +165,8 @@ func usageText() string {
 		"  magma [flags] <repo-path> <folder-name> <vault-path>\n\n" +
 		"ARGUMENTS:\n" +
 		"  <repo-path>     path to the Git repository to analyze (language is auto-detected;\n" +
-		"                  v" + version + " supports Go — others are refused honestly)\n" +
+		"                  v" + version + " supports " + strings.Join(backend.Supported(), ", ") +
+		" — others are refused honestly)\n" +
 		"  <folder-name>   a label for this map, and the folder created for it inside the\n" +
 		"                  vault. Must be a single path component (no '/', '\\', '.', '..')\n" +
 		"  <vault-path>    the Obsidian vault directory the map folder is written into, as\n" +
@@ -373,7 +374,8 @@ func refusedGraph(meta contract.Meta, lang detect.Lang) contract.Graph {
 	if lang == detect.Unknown {
 		reason = "no supported language detected (no go.mod, Cargo.toml, package.json, Gradle, or pom.xml)"
 	} else {
-		reason = fmt.Sprintf("language %q detected but its parser is not built yet (magma %s supports Go)", lang, version)
+		reason = fmt.Sprintf("language %q detected but its parser is not built yet (magma %s supports %s)",
+			lang, version, strings.Join(backend.Supported(), ", "))
 	}
 	return contract.NewGraph(meta, string(lang), "").Refuse(reason)
 }
