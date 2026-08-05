@@ -246,6 +246,31 @@ pub fn init_edges<'db>(
 /// through the recursion rather than recomputed per node for the same reason
 /// Family D threads `truncated`: they belong to the body this walk started
 /// from, and macro descent must not lose them.
+/// One desugared-form arm: cast the visited node to a syntax form and, if
+/// inference resolved that form to a function, record the edge.
+///
+/// Family B's simple arms were four copies of this five-line shape, differing
+/// only in which `Semantics::resolve_*` they call — and `walk` grew one such
+/// copy per form. Parameterising over the resolver makes a new form a single
+/// line at the call site instead of an edit to a 283-line function, which is
+/// the whole point of the structural-debt task: a family should be an addition.
+///
+/// The edge is recorded through `push_resolved`, so the generic/`dyn Trait`
+/// fallback to the trait's own declared function is inherited unchanged rather
+/// than reimplemented per form.
+fn desugared<N: AstNode>(
+    cx: Ctx<'_, '_>,
+    n: &SyntaxNode,
+    out: &mut Vec<Site>,
+    resolve: impl FnOnce(&N) -> Option<ra_ap_hir::Function>,
+) {
+    if let Some(form) = N::cast(n.clone()) {
+        if let Some(f) = resolve(&form) {
+            push_resolved(cx, n, f, out);
+        }
+    }
+}
+
 fn walk<'db>(
     cx: Ctx<'_, 'db>,
     node: &SyntaxNode,
@@ -336,26 +361,18 @@ fn walk<'db>(
         // `sema.resolve_index_expr` itself already folds in the `IndexMut`
         // case (see its doc comment upstream) when inference selected it, so
         // there is nothing left for this call site to special-case.
-        if let Some(bin) = ast::BinExpr::cast(n.clone()) {
-            if let Some(f) = sema.resolve_bin_expr(&bin) {
-                push_resolved(cx, &n, f, out);
-            }
-        }
-        if let Some(prefix) = ast::PrefixExpr::cast(n.clone()) {
-            if let Some(f) = sema.resolve_prefix_expr(&prefix) {
-                push_resolved(cx, &n, f, out);
-            }
-        }
-        if let Some(index) = ast::IndexExpr::cast(n.clone()) {
-            if let Some(f) = sema.resolve_index_expr(&index) {
-                push_resolved(cx, &n, f, out);
-            }
-        }
-        if let Some(await_expr) = ast::AwaitExpr::cast(n.clone()) {
-            if let Some(f) = sema.resolve_await_to_poll(&await_expr) {
-                push_resolved(cx, &n, f, out);
-            }
-        }
+        // These four are structurally identical — cast, resolve, record — and
+        // differ only in WHICH `Semantics::resolve_*` inference exposes. Adding
+        // the next such form is one line here, not another five-line block
+        // bolted onto this function.
+        desugared(cx, &n, out, |e: &ast::BinExpr| sema.resolve_bin_expr(e));
+        desugared(cx, &n, out, |e: &ast::PrefixExpr| {
+            sema.resolve_prefix_expr(e)
+        });
+        desugared(cx, &n, out, |e: &ast::IndexExpr| sema.resolve_index_expr(e));
+        desugared(cx, &n, out, |e: &ast::AwaitExpr| {
+            sema.resolve_await_to_poll(e)
+        });
         if let Some(try_expr) = ast::TryExpr::cast(n.clone()) {
             // Resolves `Try::branch` — the first half of `?`'s desugaring.
             // For the two Try implementors stable Rust allows (`Result`,
