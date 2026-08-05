@@ -279,7 +279,7 @@ fn walk<'db>(
     truncated: &mut bool,
     ctx: &BodyCtx<'_, 'db>,
 ) {
-    let Ctx { db, sema, .. } = cx;
+    let Ctx { sema, .. } = cx;
     if depth > MACRO_DEPTH_LIMIT {
         // Family D: this used to be silent — an expansion cut off here is
         // indistinguishable, from the caller's side, from one that simply
@@ -373,180 +373,213 @@ fn walk<'db>(
         desugared(cx, &n, out, |e: &ast::AwaitExpr| {
             sema.resolve_await_to_poll(e)
         });
-        if let Some(try_expr) = ast::TryExpr::cast(n.clone()) {
-            // Resolves `Try::branch` — the first half of `?`'s desugaring.
-            // For the two Try implementors stable Rust allows (`Result`,
-            // `Option`), `branch` lives in core, so this edge is real but
-            // never workspace-local (dropped by the `index` lookup in
-            // `edges`/`init_edges`, same as any other out-of-workspace
-            // target — harmless). What this does NOT resolve: the implicit
-            // `From::from` error-type conversion `?` also performs via
-            // `FromResidual` when the function's error type differs from the
-            // propagated one — that conversion has no expression node of its
-            // own for `Semantics` to resolve (it is a hidden argument to
-            // `FromResidual::from_residual`, itself synthesized, with no
-            // pinned-API equivalent of `resolve_await_to_poll` exposing it).
-            // A user's `impl From<E1> for E2` reached only via `?` is
-            // therefore still open — see the Task B report.
-            if let Some(f) = sema.resolve_try_expr(&try_expr) {
-                push_resolved(cx, &n, f, out);
-            }
-            // ...and this closes it, by the same type-directed route format
-            // args above takes rather than by resolving the (unreachable)
-            // conversion node. `err_ty` is the ENCLOSING function's error
-            // type, `E2` in `-> Result<_, E2>`; every `impl From<_> for E2`
-            // in the graph gets an edge. That over-approximates across the
-            // source type — `?` at this site converts from one specific `E1`,
-            // and this cannot tell which — but over-approximating is the safe
-            // direction (§fails toward live), and narrowing it would mean
-            // proving which `FromResidual` impl inference selected, which is
-            // precisely the thing with no exposed API here. Same shape as
-            // format args deliberately checking both `Display` and `Debug`
-            // regardless of the spec text.
-            //
-            // Costs nothing when the error types match (`-> Result<_, E>`
-            // propagating an `E`): the `From<E> for E` reflexive impl is
-            // core's blanket one, not workspace-local, so `edges`' `index`
-            // lookup drops the edge.
-            if let Some(err_ty) = ctx.err_ty {
-                if let Some(from_trait) = core_trait(db, &["convert"], "From") {
-                    push_trait_method_edges(cx, &n, err_ty, from_trait, "from", out);
-                }
+        push_try_edges(cx, &n, out, ctx);
+        push_drop_edges(cx, &n, out, ctx);
+        push_format_args_edges(cx, &n, out);
+        push_for_edges(cx, &n, out);
+    }
+}
+
+/// `?` — `Try::branch`, plus the implicit `From::from` error conversion.
+fn push_try_edges<'db>(
+    cx: Ctx<'_, 'db>,
+    n: &SyntaxNode,
+    out: &mut Vec<Site>,
+    ctx: &BodyCtx<'_, 'db>,
+) {
+    let Ctx { db, sema, .. } = cx;
+    if let Some(try_expr) = ast::TryExpr::cast(n.clone()) {
+        // Resolves `Try::branch` — the first half of `?`'s desugaring.
+        // For the two Try implementors stable Rust allows (`Result`,
+        // `Option`), `branch` lives in core, so this edge is real but
+        // never workspace-local (dropped by the `index` lookup in
+        // `edges`/`init_edges`, same as any other out-of-workspace
+        // target — harmless). What this does NOT resolve: the implicit
+        // `From::from` error-type conversion `?` also performs via
+        // `FromResidual` when the function's error type differs from the
+        // propagated one — that conversion has no expression node of its
+        // own for `Semantics` to resolve (it is a hidden argument to
+        // `FromResidual::from_residual`, itself synthesized, with no
+        // pinned-API equivalent of `resolve_await_to_poll` exposing it).
+        // A user's `impl From<E1> for E2` reached only via `?` is
+        // therefore still open — see the Task B report.
+        if let Some(f) = sema.resolve_try_expr(&try_expr) {
+            push_resolved(cx, n, f, out);
+        }
+        // ...and this closes it, by the same type-directed route format
+        // args above takes rather than by resolving the (unreachable)
+        // conversion node. `err_ty` is the ENCLOSING function's error
+        // type, `E2` in `-> Result<_, E2>`; every `impl From<_> for E2`
+        // in the graph gets an edge. That over-approximates across the
+        // source type — `?` at this site converts from one specific `E1`,
+        // and this cannot tell which — but over-approximating is the safe
+        // direction (§fails toward live), and narrowing it would mean
+        // proving which `FromResidual` impl inference selected, which is
+        // precisely the thing with no exposed API here. Same shape as
+        // format args deliberately checking both `Display` and `Debug`
+        // regardless of the spec text.
+        //
+        // Costs nothing when the error types match (`-> Result<_, E>`
+        // propagating an `E`): the `From<E> for E` reflexive impl is
+        // core's blanket one, not workspace-local, so `edges`' `index`
+        // lookup drops the edge.
+        if let Some(err_ty) = ctx.err_ty {
+            if let Some(from_trait) = core_trait(db, &["convert"], "From") {
+                push_trait_method_edges(cx, n, err_ty, from_trait, "from", out);
             }
         }
-        // Family B, last form: `Drop::drop` at scope exit. Unlike every other
-        // desugaring above, this one has NO expression node whatsoever — a
-        // value going out of scope is not written down anywhere, so there is
-        // nothing to cast to an `ast::` shape and nothing for any
-        // `Semantics::resolve_*` to key off. Resolved instead from the types
-        // appearing in the body: a value of type `T` occurring here means
-        // `<T as Drop>::drop` may run when it goes out of scope, so the edge
-        // is emitted from this body. `dynamic`, because this is an
-        // occurrence, not a proven drop — the value may be moved out and
-        // dropped somewhere else entirely, and proving which would need the
-        // move/liveness analysis this walker deliberately does not do.
-        //
-        // WHY THIS IS OBSERVABLE AT ALL, contrary to the earlier reading that
-        // it could only be caught by liveness analysis: rustc's `dead_code`
-        // lint never names a trait-impl method, so it says nothing about
-        // `drop` itself either way. What it DOES report is `drop`'s
-        // transitive callee — measured on a probe crate, `function
-        // cleanup_never is never used` for a `Drop` impl on a
-        // never-constructed type, while the corresponding callee of a
-        // constructed type's `drop` is NOT reported. So the divergence lands
-        // one hop past `drop`, which is exactly what `testdata/drop_glue`
-        // pins.
-        //
-        // TRANSITIVE, not just the occurring type's own impl: dropping an
-        // `Outer` also drops everything it owns, so `drop_glue` maps each ADT
-        // to every `Drop::drop` its destructor can reach. Measured as a real
-        // false-dead-code source, not a hypothetical — a `#[derive(Default)]
-        // struct Outer { inner: Inner }` where `Inner: Drop` puts `Inner` in
-        // NO expression anywhere, yet `inner_cleanup` genuinely runs, and
-        // rustc agrees it is live while a non-transitive lookup calls it
-        // dead. See `drop_glue_map`.
-        if !ctx.drop_glue.is_empty() {
-            if let Some(expr) = ast::Expr::cast(n.clone()) {
-                if let Some(adt) = sema
-                    .type_of_expr(&expr)
-                    .map(|i| i.original)
-                    .and_then(|t| t.as_adt())
-                {
-                    for drop_fn in ctx.drop_glue.get(&adt).into_iter().flatten() {
-                        out.push(site(cx, &n, *drop_fn, true));
-                    }
-                }
-            }
-        }
-        // `println!("{}", w)` / `{:?}` -> `Display::fmt` / `Debug::fmt`. This
-        // is NOT a syntactic method call even after macro expansion: the
-        // `format_args!` builtin macro (confirmed by dumping its expanded
-        // tree — see the Task B report) lowers straight to a
-        // `FORMAT_ARGS_EXPR` node whose per-argument children are
-        // `FormatArgsArg`, never a `CallExpr`/`MethodCallExpr` naming
-        // `fmt` — the trait dispatch happens inside the format-args
-        // machinery's internals, invisible to this syntax walk. No
-        // `Semantics::resolve_*` exists for it at this pinned version, so
-        // this resolves it the same way `resolve_bin_expr` et al. do
-        // internally: from the argument's own type, not the (`{}` vs
-        // `{:?}`) format spec text. Deliberately checks BOTH Display and
-        // Debug impls for the argument's type regardless of which spec was
-        // actually written — over-approximating is the safe direction
-        // (§Non-negotiable: fails toward live), and parsing the spec to
-        // pick exactly one would only ever narrow, never fix, a missed edge.
-        if let Some(fargs) = ast::FormatArgsExpr::cast(n.clone()) {
-            for arg in fargs
-                .syntax()
-                .children()
-                .filter_map(ast::FormatArgsArg::cast)
+    }
+}
+
+/// `Drop::drop` at scope exit, resolved from types rather than syntax.
+fn push_drop_edges<'db>(
+    cx: Ctx<'_, 'db>,
+    n: &SyntaxNode,
+    out: &mut Vec<Site>,
+    ctx: &BodyCtx<'_, 'db>,
+) {
+    let Ctx { sema, .. } = cx;
+    // Family B, last form: `Drop::drop` at scope exit. Unlike every other
+    // desugaring above, this one has NO expression node whatsoever — a
+    // value going out of scope is not written down anywhere, so there is
+    // nothing to cast to an `ast::` shape and nothing for any
+    // `Semantics::resolve_*` to key off. Resolved instead from the types
+    // appearing in the body: a value of type `T` occurring here means
+    // `<T as Drop>::drop` may run when it goes out of scope, so the edge
+    // is emitted from this body. `dynamic`, because this is an
+    // occurrence, not a proven drop — the value may be moved out and
+    // dropped somewhere else entirely, and proving which would need the
+    // move/liveness analysis this walker deliberately does not do.
+    //
+    // WHY THIS IS OBSERVABLE AT ALL, contrary to the earlier reading that
+    // it could only be caught by liveness analysis: rustc's `dead_code`
+    // lint never names a trait-impl method, so it says nothing about
+    // `drop` itself either way. What it DOES report is `drop`'s
+    // transitive callee — measured on a probe crate, `function
+    // cleanup_never is never used` for a `Drop` impl on a
+    // never-constructed type, while the corresponding callee of a
+    // constructed type's `drop` is NOT reported. So the divergence lands
+    // one hop past `drop`, which is exactly what `testdata/drop_glue`
+    // pins.
+    //
+    // TRANSITIVE, not just the occurring type's own impl: dropping an
+    // `Outer` also drops everything it owns, so `drop_glue` maps each ADT
+    // to every `Drop::drop` its destructor can reach. Measured as a real
+    // false-dead-code source, not a hypothetical — a `#[derive(Default)]
+    // struct Outer { inner: Inner }` where `Inner: Drop` puts `Inner` in
+    // NO expression anywhere, yet `inner_cleanup` genuinely runs, and
+    // rustc agrees it is live while a non-transitive lookup calls it
+    // dead. See `drop_glue_map`.
+    if !ctx.drop_glue.is_empty() {
+        if let Some(expr) = ast::Expr::cast(n.clone()) {
+            if let Some(adt) = sema
+                .type_of_expr(&expr)
+                .map(|i| i.original)
+                .and_then(|t| t.as_adt())
             {
-                let Some(arg_expr) = arg.expr() else { continue };
-                let Some(ty) = sema.type_of_expr(&arg_expr).map(|info| info.original) else {
-                    continue;
-                };
-                for trait_ in [
-                    core_trait(db, &["fmt"], "Display"),
-                    core_trait(db, &["fmt"], "Debug"),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    push_trait_method_edges(cx, &n, &ty, trait_, "fmt", out);
-                }
-            }
-        }
-        // `for x in it { .. }` -> `IntoIterator::into_iter(it)`, then
-        // `Iterator::next(&mut <result>)` each iteration. Like format args,
-        // this is HIR-level desugaring with no corresponding syntax for
-        // `Semantics::resolve_*` to key off (`ForExpr` lowers straight to a
-        // `match`/`loop` in `hir_def::body::lower` with no surface call
-        // node), so this resolves both trait methods from the iterable's own
-        // type the same way format args resolves `fmt` — by matching impls
-        // to the concrete `Adt`, not by proving inference chose them. The
-        // `IntoIter` associated type is looked up via
-        // `normalize_trait_assoc_type` (the same API `resolve_await_to_poll`
-        // above uses for `IntoFuture`'s associated type) so `Iterator::next`
-        // is matched against the actual iterator type, not the iterable
-        // itself — the two differ whenever `IntoIterator` isn't its own
-        // `Iterator` (e.g. `Vec<T>` iterates via `std::vec::IntoIter<T>`,
-        // never `Vec<T>` itself). Falls back to the iterable's own type when
-        // the associated type can't be normalised (covers `impl Iterator`
-        // types reached only through the core blanket `impl<I: Iterator>
-        // IntoIterator for I`, where `IntoIter = Self` trivially).
-        if let Some(for_expr) = ast::ForExpr::cast(n.clone()) {
-            if let Some(iterable) = for_expr.iterable() {
-                if let Some(src_ty) = sema.type_of_expr(&iterable).map(|info| info.original) {
-                    if let Some(into_iter_trait) =
-                        core_trait(db, &["iter", "traits", "collect"], "IntoIterator")
-                    {
-                        push_trait_method_edges(cx, &n, &src_ty, into_iter_trait, "into_iter", out);
-                        let into_iter_alias =
-                            into_iter_trait
-                                .items(db)
-                                .into_iter()
-                                .find_map(|item| match item {
-                                    AssocItem::TypeAlias(alias)
-                                        if alias.name(db).as_str() == "IntoIter" =>
-                                    {
-                                        Some(alias)
-                                    }
-                                    _ => None,
-                                });
-                        let iter_ty = into_iter_alias
-                            .and_then(|alias| src_ty.normalize_trait_assoc_type(db, &[], alias))
-                            .unwrap_or(src_ty);
-                        if let Some(iterator_trait) =
-                            core_trait(db, &["iter", "traits", "iterator"], "Iterator")
-                        {
-                            push_trait_method_edges(cx, &n, &iter_ty, iterator_trait, "next", out);
-                        }
-                    }
+                for drop_fn in ctx.drop_glue.get(&adt).into_iter().flatten() {
+                    out.push(site(cx, n, *drop_fn, true));
                 }
             }
         }
     }
 }
 
+/// Format arguments — `Display::fmt` / `Debug::fmt`.
+fn push_format_args_edges<'db>(cx: Ctx<'_, 'db>, n: &SyntaxNode, out: &mut Vec<Site>) {
+    let Ctx { db, sema, .. } = cx;
+    // `println!("{}", w)` / `{:?}` -> `Display::fmt` / `Debug::fmt`. This
+    // is NOT a syntactic method call even after macro expansion: the
+    // `format_args!` builtin macro (confirmed by dumping its expanded
+    // tree — see the Task B report) lowers straight to a
+    // `FORMAT_ARGS_EXPR` node whose per-argument children are
+    // `FormatArgsArg`, never a `CallExpr`/`MethodCallExpr` naming
+    // `fmt` — the trait dispatch happens inside the format-args
+    // machinery's internals, invisible to this syntax walk. No
+    // `Semantics::resolve_*` exists for it at this pinned version, so
+    // this resolves it the same way `resolve_bin_expr` et al. do
+    // internally: from the argument's own type, not the (`{}` vs
+    // `{:?}`) format spec text. Deliberately checks BOTH Display and
+    // Debug impls for the argument's type regardless of which spec was
+    // actually written — over-approximating is the safe direction
+    // (§Non-negotiable: fails toward live), and parsing the spec to
+    // pick exactly one would only ever narrow, never fix, a missed edge.
+    if let Some(fargs) = ast::FormatArgsExpr::cast(n.clone()) {
+        for arg in fargs
+            .syntax()
+            .children()
+            .filter_map(ast::FormatArgsArg::cast)
+        {
+            let Some(arg_expr) = arg.expr() else { continue };
+            let Some(ty) = sema.type_of_expr(&arg_expr).map(|info| info.original) else {
+                continue;
+            };
+            for trait_ in [
+                core_trait(db, &["fmt"], "Display"),
+                core_trait(db, &["fmt"], "Debug"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                push_trait_method_edges(cx, n, &ty, trait_, "fmt", out);
+            }
+        }
+    }
+}
+
+/// `for` loops — `IntoIterator::into_iter`, then `Iterator::next`.
+fn push_for_edges<'db>(cx: Ctx<'_, 'db>, n: &SyntaxNode, out: &mut Vec<Site>) {
+    let Ctx { db, sema, .. } = cx;
+    // `for x in it { .. }` -> `IntoIterator::into_iter(it)`, then
+    // `Iterator::next(&mut <result>)` each iteration. Like format args,
+    // this is HIR-level desugaring with no corresponding syntax for
+    // `Semantics::resolve_*` to key off (`ForExpr` lowers straight to a
+    // `match`/`loop` in `hir_def::body::lower` with no surface call
+    // node), so this resolves both trait methods from the iterable's own
+    // type the same way format args resolves `fmt` — by matching impls
+    // to the concrete `Adt`, not by proving inference chose them. The
+    // `IntoIter` associated type is looked up via
+    // `normalize_trait_assoc_type` (the same API `resolve_await_to_poll`
+    // above uses for `IntoFuture`'s associated type) so `Iterator::next`
+    // is matched against the actual iterator type, not the iterable
+    // itself — the two differ whenever `IntoIterator` isn't its own
+    // `Iterator` (e.g. `Vec<T>` iterates via `std::vec::IntoIter<T>`,
+    // never `Vec<T>` itself). Falls back to the iterable's own type when
+    // the associated type can't be normalised (covers `impl Iterator`
+    // types reached only through the core blanket `impl<I: Iterator>
+    // IntoIterator for I`, where `IntoIter = Self` trivially).
+    if let Some(for_expr) = ast::ForExpr::cast(n.clone()) {
+        if let Some(iterable) = for_expr.iterable() {
+            if let Some(src_ty) = sema.type_of_expr(&iterable).map(|info| info.original) {
+                if let Some(into_iter_trait) =
+                    core_trait(db, &["iter", "traits", "collect"], "IntoIterator")
+                {
+                    push_trait_method_edges(cx, n, &src_ty, into_iter_trait, "into_iter", out);
+                    let into_iter_alias =
+                        into_iter_trait
+                            .items(db)
+                            .into_iter()
+                            .find_map(|item| match item {
+                                AssocItem::TypeAlias(alias)
+                                    if alias.name(db).as_str() == "IntoIter" =>
+                                {
+                                    Some(alias)
+                                }
+                                _ => None,
+                            });
+                    let iter_ty = into_iter_alias
+                        .and_then(|alias| src_ty.normalize_trait_assoc_type(db, &[], alias))
+                        .unwrap_or(src_ty);
+                    if let Some(iterator_trait) =
+                        core_trait(db, &["iter", "traits", "iterator"], "Iterator")
+                    {
+                        push_trait_method_edges(cx, n, &iter_ty, iterator_trait, "next", out);
+                    }
+                }
+            }
+        }
+    }
+}
 /// Emits a dynamic edge to `trait_`'s `method_name` for whichever impl's self
 /// type matches `ty`'s own `Adt` — the same "match impls of a trait by self
 /// type" shape `push_resolved`'s trait-container branch and `roots.rs`'s
