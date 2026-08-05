@@ -1,9 +1,10 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/magma-dark.svg">
-  <img alt="" width="48" height="48" src="docs/assets/magma-light.svg">
-</picture>
-
-# magma
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/magma-dark.svg">
+    <img alt="" width="40" height="40" align="absmiddle" src="docs/assets/magma-light.svg">
+  </picture>
+  magma <sub>the code call mapper</sub>
+</h1>
 
 [![CI](https://github.com/robot-accomplice/magma/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/magma/actions/workflows/ci.yml)
 [![Release](https://github.com/robot-accomplice/magma/actions/workflows/release.yml/badge.svg)](https://github.com/robot-accomplice/magma/actions/workflows/release.yml)
