@@ -177,19 +177,6 @@ fn is_init_cfg_test(
             .any(|m| m.attrs(db).cfgs(db).is_some_and(cfg_requires_test))
 }
 
-/// Builds a synthesized `model::Function` node for `c`'s initializer, if it
-/// has one, and pushes it (paired with `InitSource::Const(c)`) onto `out`.
-/// Mirrors `push`'s real-file/macro-expansion location handling exactly
-/// (duplicated rather than shared, same precedent as `decl_loc`'s own doc
-/// comment: needing the raw `FileId` back for the `generated` check, not
-/// just a repo-relative string, is what stops this from calling `decl_loc`
-/// directly).
-/// `too_many_arguments`: the extra parameters are the invariant analysis
-/// context (`db`, `sema`, `vfs`, `root`, `target_dir`) that every enumeration
-/// helper on this path threads. Bundling them into a context struct is a
-/// worthwhile refactor of `enumerate.rs` as a whole, not something to do to one
-/// function while leaving its three siblings inconsistent.
-#[allow(clippy::too_many_arguments)]
 /// Everything the shared builder below needs that a `const` and a `static`
 /// supply DIFFERENTLY. The two were near-identical 100-line copies —
 /// `push_const` and `push_static` differed in seven mechanical places and
@@ -222,6 +209,14 @@ struct InitFacts {
     source: InitSource,
 }
 
+/// Builds a synthesized `model::Function` node for `c`'s initializer, if it
+/// has one, and pushes it (paired with `InitSource::Const(c)`) onto `out`.
+/// Mirrors `push`'s real-file/macro-expansion location handling exactly
+/// (duplicated rather than shared, same precedent as `decl_loc`'s own doc
+/// comment: needing the raw `FileId` back for the `generated` check, not
+/// just a repo-relative string, is what stops this from calling `decl_loc`
+/// directly).
+///
 /// `too_many_arguments`: see `push_init`.
 #[allow(clippy::too_many_arguments)]
 fn push_const(
