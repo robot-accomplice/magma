@@ -14,6 +14,7 @@ use ra_ap_syntax::ast::HasName;
 use ra_ap_syntax::AstNode;
 use ra_ap_vfs::{FileId, Vfs};
 
+use crate::ctx::Ctx;
 use crate::model;
 
 /// Every function in workspace-member crates, paired with its hir handle.
@@ -21,13 +22,8 @@ use crate::model;
 /// The CrateOrigin::Local filter is not optional: without it this returns the
 /// entire dependency closure plus std (118,081 vs 8,437 on roboticus-rust),
 /// which floods the graph and produces false dead code.
-pub fn collect(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    target_dir: &AbsPath,
-) -> Vec<(model::Function, ra_ap_hir::Function)> {
+pub fn collect(cx: Ctx<'_, '_>) -> Vec<(model::Function, ra_ap_hir::Function)> {
+    let Ctx { db, .. } = cx;
     let mut out = Vec::new();
     for krate in Crate::all(db) {
         if !matches!(krate.origin(db), CrateOrigin::Local { .. }) {
@@ -36,12 +32,12 @@ pub fn collect(
         for module in krate.modules(db) {
             for decl in module.declarations(db) {
                 if let ModuleDef::Function(f) = decl {
-                    push(db, sema, vfs, root, target_dir, f, &mut out);
+                    push(cx, f, &mut out);
                 }
                 if let ModuleDef::Trait(tr) = decl {
                     for item in tr.items(db) {
                         if let AssocItem::Function(f) = item {
-                            push(db, sema, vfs, root, target_dir, f, &mut out);
+                            push(cx, f, &mut out);
                         }
                     }
                 }
@@ -49,7 +45,7 @@ pub fn collect(
             for imp in module.impl_defs(db) {
                 for item in imp.items(db) {
                     if let AssocItem::Function(f) = item {
-                        push(db, sema, vfs, root, target_dir, f, &mut out);
+                        push(cx, f, &mut out);
                     }
                 }
             }
@@ -101,14 +97,8 @@ pub enum InitSource {
 /// initializer simply stays unwalked, the same (pre-existing, safe-direction
 /// under-report, never a false-dead invention) gap every other
 /// un-enumerated item already has.
-pub fn collect_inits(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    target_dir: &AbsPath,
-    next_id: u32,
-) -> Vec<(model::Function, InitSource)> {
+pub fn collect_inits(cx: Ctx<'_, '_>, next_id: u32) -> Vec<(model::Function, InitSource)> {
+    let Ctx { db, .. } = cx;
     let mut out = Vec::new();
     let mut next_id = next_id;
     for krate in Crate::all(db) {
@@ -118,25 +108,12 @@ pub fn collect_inits(
         for module in krate.modules(db) {
             for decl in module.declarations(db) {
                 match decl {
-                    ModuleDef::Const(c) => {
-                        push_const(db, sema, vfs, root, target_dir, c, &mut next_id, &mut out)
-                    }
-                    ModuleDef::Static(s) => {
-                        push_static(db, sema, vfs, root, target_dir, s, &mut next_id, &mut out)
-                    }
+                    ModuleDef::Const(c) => push_const(cx, c, &mut next_id, &mut out),
+                    ModuleDef::Static(s) => push_static(cx, s, &mut next_id, &mut out),
                     ModuleDef::Trait(tr) => {
                         for item in tr.items(db) {
                             if let AssocItem::Const(c) = item {
-                                push_const(
-                                    db,
-                                    sema,
-                                    vfs,
-                                    root,
-                                    target_dir,
-                                    c,
-                                    &mut next_id,
-                                    &mut out,
-                                );
+                                push_const(cx, c, &mut next_id, &mut out);
                             }
                         }
                     }
@@ -146,7 +123,7 @@ pub fn collect_inits(
             for imp in module.impl_defs(db) {
                 for item in imp.items(db) {
                     if let AssocItem::Const(c) = item {
-                        push_const(db, sema, vfs, root, target_dir, c, &mut next_id, &mut out);
+                        push_const(cx, c, &mut next_id, &mut out);
                     }
                 }
             }
@@ -216,19 +193,13 @@ struct InitFacts {
 /// comment: needing the raw `FileId` back for the `generated` check, not
 /// just a repo-relative string, is what stops this from calling `decl_loc`
 /// directly).
-///
-/// `too_many_arguments`: see `push_init`.
-#[allow(clippy::too_many_arguments)]
 fn push_const(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    target_dir: &AbsPath,
+    cx: Ctx<'_, '_>,
     c: Const,
     next_id: &mut u32,
     out: &mut Vec<(model::Function, InitSource)>,
 ) {
+    let Ctx { db, .. } = cx;
     // No initializer -> nothing for walk.rs to walk and no `from` endpoint
     // is ever needed (a trait's own const DECLARATION with no default,
     // `const N: i32;`, has no body).
@@ -244,11 +215,7 @@ fn push_const(
     let module = c.module(db);
     let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
     push_init(
-        db,
-        sema,
-        vfs,
-        root,
-        target_dir,
+        cx,
         InitFacts {
             name: name.as_str().to_owned(),
             hir_file: src.file_id,
@@ -271,17 +238,13 @@ fn push_const(
 /// `Option<Name>` (there is no anonymous static), and a static is never an
 /// associated item (Rust has no associated statics), so `assoc` is always
 /// `None` and its symbol takes `qualify_stem`'s unqualified fallback.
-#[allow(clippy::too_many_arguments)]
 fn push_static(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    target_dir: &AbsPath,
+    cx: Ctx<'_, '_>,
     s: Static,
     next_id: &mut u32,
     out: &mut Vec<(model::Function, InitSource)>,
 ) {
+    let Ctx { db, .. } = cx;
     // `extern "C" { static FOO: i32; }` has no initializer -- skip, mirrors
     // push_const's trait-const-declaration-with-no-default case.
     if s.value(db).is_none() {
@@ -294,11 +257,7 @@ fn push_static(
     let module = s.module(db);
     let display_target = DisplayTarget::from_crate(db, module.krate(db).into());
     push_init(
-        db,
-        sema,
-        vfs,
-        root,
-        target_dir,
+        cx,
         InitFacts {
             name: s.name(db).as_str().to_owned(),
             hir_file: src.file_id,
@@ -320,22 +279,19 @@ fn push_static(
 /// real-file/macro-expansion location handling exactly (still duplicated
 /// against `push` itself, for the reason `decl_loc` records: needing the raw
 /// `FileId` back for the `generated` check, not just a repo-relative string).
-///
-/// `too_many_arguments`: `db`/`sema`/`vfs`/`root`/`target_dir` is the invariant
-/// analysis context every enumeration helper on this path threads. Bundling it
-/// into a context struct is the next step of the structural-debt task, done
-/// across `enumerate.rs` at once rather than to one function in isolation.
-#[allow(clippy::too_many_arguments)]
 fn push_init(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    target_dir: &AbsPath,
+    cx: Ctx<'_, '_>,
     facts: InitFacts,
     next_id: &mut u32,
     out: &mut Vec<(model::Function, InitSource)>,
 ) {
+    let Ctx {
+        db,
+        sema,
+        vfs,
+        root,
+        target_dir,
+    } = cx;
     let (file_id, line, column) = match facts.hir_file.file_id() {
         Some(efid) => {
             let file_id = efid.file_id(db);
@@ -617,14 +573,17 @@ fn qualified_init_symbol(
 }
 
 fn push(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    target_dir: &AbsPath,
+    cx: Ctx<'_, '_>,
     f: ra_ap_hir::Function,
     out: &mut Vec<(model::Function, ra_ap_hir::Function)>,
 ) {
+    let Ctx {
+        db,
+        sema,
+        vfs,
+        root,
+        target_dir,
+    } = cx;
     let Some(src) = f.source(db) else { return };
     let Some(name_node) = src.value.name() else {
         return;
@@ -682,7 +641,7 @@ fn push(
             column + 1,
             false,
         ),
-        false => match relocate_out_of_root(db, sema, vfs, root, f) {
+        false => match relocate_out_of_root(cx, f) {
             Some(loc) => (loc.file, loc.line, loc.column, true),
             None => (
                 repo_relative_path(vfs, root, file_id),
@@ -790,7 +749,7 @@ fn push(
             macro_truncated: false,
             signature: model::Signature { params, results },
             doc,
-            trait_impl: trait_impl_loc(db, sema, vfs, root, f),
+            trait_impl: trait_impl_loc(cx, f),
         },
         f,
     ));
@@ -804,20 +763,15 @@ fn push(
 /// exists to key off of (see the module comment in `roots.rs` for the same
 /// trait-impl/inherent-impl/trait-decl split, and `scripts/oracle-diff.sh`
 /// for how the oracle harness consumes this).
-fn trait_impl_loc(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    f: ra_ap_hir::Function,
-) -> Option<model::TraitImpl> {
+fn trait_impl_loc(cx: Ctx<'_, '_>, f: ra_ap_hir::Function) -> Option<model::TraitImpl> {
+    let Ctx { db, .. } = cx;
     let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else {
         return None;
     };
     let tr = imp.trait_(db)?; // None => inherent impl, not a trait impl.
 
     let trait_src = tr.source(db)?;
-    let trait_decl = decl_loc(db, sema, vfs, root, trait_src)?;
+    let trait_decl = decl_loc(cx, trait_src)?;
 
     // The self type only gates the cascade when it can independently receive
     // its own dead_code diagnostic: a workspace-local struct/enum/union.
@@ -847,10 +801,7 @@ fn trait_impl_loc(
             ) {
                 model::SelfType::NotEligible
             } else {
-                match adt
-                    .source(db)
-                    .and_then(|src| decl_loc(db, sema, vfs, root, src))
-                {
+                match adt.source(db).and_then(|src| decl_loc(cx, src)) {
                     Some(loc) => model::SelfType::Local {
                         file: loc.file,
                         line: loc.line,
@@ -877,14 +828,8 @@ fn trait_impl_loc(
 /// diagnostic column always points at the exact name token, never just the
 /// line — so a caller matching on (file, line, column) against rustc's own
 /// `column_start` gets an exact-token match, not merely a same-line one.
-fn decl_loc<N: AstNode + HasName>(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    src: InFile<N>,
-) -> Option<model::Loc> {
-    decl_loc_with_file(db, sema, vfs, root, src).map(|(_, loc)| loc)
+fn decl_loc<N: AstNode + HasName>(cx: Ctx<'_, '_>, src: InFile<N>) -> Option<model::Loc> {
+    decl_loc_with_file(cx, src).map(|(_, loc)| loc)
 }
 
 /// `decl_loc` plus the resolved `FileId` it derived the location from.
@@ -897,12 +842,16 @@ fn decl_loc<N: AstNode + HasName>(
 /// applies to the original location, so both sides of the swap are judged by
 /// one predicate rather than by string shape.
 fn decl_loc_with_file<N: AstNode + HasName>(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
+    cx: Ctx<'_, '_>,
     src: InFile<N>,
 ) -> Option<(FileId, model::Loc)> {
+    let Ctx {
+        db,
+        sema,
+        vfs,
+        root,
+        ..
+    } = cx;
     let name_node = src.value.name()?;
     let (file_id, line, column) = match src.file_id.file_id() {
         Some(efid) => {
@@ -967,13 +916,14 @@ fn is_under_root(vfs: &Vfs, root: &AbsPath, file_id: FileId) -> bool {
 /// caller for what happens then. Deliberately NOT a silent drop: dropping is
 /// an exclusion, and this harness's standing rule is that a divergence gets
 /// disclosed, never excluded.
-fn relocate_out_of_root(
-    db: &RootDatabase,
-    sema: &Semantics<'_, RootDatabase>,
-    vfs: &Vfs,
-    root: &AbsPath,
-    f: ra_ap_hir::Function,
-) -> Option<model::Loc> {
+fn relocate_out_of_root(cx: Ctx<'_, '_>, f: ra_ap_hir::Function) -> Option<model::Loc> {
+    let Ctx {
+        db,
+        sema,
+        vfs,
+        root,
+        ..
+    } = cx;
     let AssocItemContainer::Impl(imp) = f.as_assoc_item(db)?.container(db) else {
         return None;
     };
@@ -1009,10 +959,7 @@ fn relocate_out_of_root(
     ) {
         return None;
     }
-    in_root(
-        adt.source(db)
-            .and_then(|src| decl_loc_with_file(db, sema, vfs, root, src)),
-    )
+    in_root(adt.source(db).and_then(|src| decl_loc_with_file(cx, src)))
 }
 
 /// The real-file/macro-expansion location handling `push` and
