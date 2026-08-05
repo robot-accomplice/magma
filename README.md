@@ -173,6 +173,13 @@ rooted (0.872) and **zero** dead functions reported. Every number was accurate, 
 computing `dead = !reachable && !root` rendered it as a clean bill of health. That is the
 failure this field exists to make visible.
 
+> **Architext compatibility.** Both fields are declared in Architext's `code-graph` schema, but
+> that landed **after** their 1.8.0 tag. Their schema root sets `additionalProperties: false`, so
+> **Architext 1.8.0 rejects a magma ≥ 0.3.0 `code-graph.json` outright** — the whole document, not
+> just the unknown fields. Consuming these artifacts needs Architext from `develop`, or the first
+> release after 1.8.0. If you hit a rejection on 1.8.0, it is the consumer's version, not
+> malformed magma output.
+
 Regenerating a map **reconciles** the notes: any markdown file the previous run wrote that
 the new render no longer lists (a function that was deleted, say) is removed. A note you
 wrote by hand, that magma never generated, is never touched.
