@@ -6,6 +6,7 @@
 //! stdout carries the JSON contract and NOTHING else — progress and timings go
 //! to stderr behind a `PROGRESS `/`TIMING ` prefix. Invoked by magma's Rust
 //! backend (internal/backend/rust.go), which finds it on PATH.
+mod ctx;
 mod enumerate;
 mod model;
 mod roots;
@@ -344,13 +345,14 @@ fn analyze_one_config(
     let t_enum = Instant::now();
     let mut funcs: Vec<(model::Function, ra_ap_hir::Function)> = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
-        let mut funcs = enumerate::collect(
+        let cx = ctx::Ctx {
             db,
-            &sema,
-            &vfs,
-            root_abs.as_path(),
-            target_dir_abs.as_path(),
-        );
+            sema: &sema,
+            vfs: &vfs,
+            root: root_abs.as_path(),
+            target_dir: target_dir_abs.as_path(),
+        };
+        let mut funcs = enumerate::collect(cx);
         roots::mark(db, &mut funcs);
         funcs
     });
@@ -406,8 +408,15 @@ fn analyze_one_config(
     let t_walk = Instant::now();
     let (calls, init_nodes) = ra_ap_hir::attach_db(db, || {
         let sema = Semantics::new(db);
+        let cx = ctx::Ctx {
+            db,
+            sema: &sema,
+            vfs: &vfs,
+            root: root_abs.as_path(),
+            target_dir: target_dir_abs.as_path(),
+        };
         // `&mut funcs`: Family D adaptation, see the `mut` binding above.
-        let mut calls = walk::edges(&sema, db, &vfs, root_abs.as_path(), &mut funcs, &index);
+        let mut calls = walk::edges(cx, &mut funcs, &index);
         eprintln!(
             "TIMING   walk (function bodies): {:.1}s for {} edges",
             t_walk.elapsed().as_secs_f64(),
@@ -423,15 +432,17 @@ fn analyze_one_config(
         // continues the id space real functions already occupy — still
         // purely local to this one pass.
         let mut inits = enumerate::collect_inits(
-            db,
-            &sema,
-            &vfs,
-            root_abs.as_path(),
-            target_dir_abs.as_path(),
+            ctx::Ctx {
+                db,
+                sema: &sema,
+                vfs: &vfs,
+                root: root_abs.as_path(),
+                target_dir: target_dir_abs.as_path(),
+            },
             funcs.len() as u32,
         );
         // `&mut inits`: Family D adaptation, same reason as `&mut funcs` above.
-        let init_edges = walk::init_edges(&sema, db, &vfs, root_abs.as_path(), &mut inits, &index);
+        let init_edges = walk::init_edges(cx, &mut inits, &index);
         calls.extend(init_edges);
         let init_nodes: Vec<model::Function> = inits.into_iter().map(|(mf, _)| mf).collect();
         eprintln!(
