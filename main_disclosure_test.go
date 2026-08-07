@@ -15,16 +15,20 @@ func TestVersionIs030(t *testing.T) {
 	}
 }
 
-// writeArtifacts must Finalize, so graph.json carries the per-run disclosure.
-// Without this the field exists on the type and is never populated in anger —
-// the whole point is that a consumer sees root_ratio on a real map.
-func TestWriteArtifactsAttachesDisclosure(t *testing.T) {
+// writeArtifacts carries through the disclosure it is GIVEN. It deliberately
+// does not Finalize: the graph arrives by value, so finalizing here would
+// attach the disclosure to this function's own copy and leave the caller's
+// other writers — notably the architext emit — describing a different run.
+// That is the defect this ordering was changed to fix; see
+// TestEveryArtifactAgreesAboutDisclosure, which pins the property rather than
+// this plumbing.
+func TestWriteArtifactsCarriesDisclosureThrough(t *testing.T) {
 	dir := t.TempDir()
 	g := contract.Graph{
 		Computable: true,
 		Fidelity:   "rta",
 		Nodes:      []contract.Node{{ID: 1, Root: true}, {ID: 2}},
-	}
+	}.Finalize() // the caller's job, as in emitReport
 	if _, _, err := writeArtifacts(dir, contract.Meta{Generator: "magma/0.3.0"}, g); err != nil {
 		t.Fatalf("writeArtifacts: %v", err)
 	}
@@ -38,7 +42,7 @@ func TestWriteArtifactsAttachesDisclosure(t *testing.T) {
 		t.Fatalf("unmarshal graph.json: %v", err)
 	}
 	if got.Disclosure == nil {
-		t.Fatal("graph.json carries no disclosure — writeArtifacts did not Finalize")
+		t.Fatal("graph.json lost the disclosure it was given")
 	}
 	if got.Disclosure.RootRatio != 0.5 {
 		t.Errorf("root_ratio = %v, want 0.5", got.Disclosure.RootRatio)

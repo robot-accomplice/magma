@@ -405,6 +405,16 @@ func architextDataFile(repo string, opts runOpts) string {
 // honest refused code-graph is required, mirroring how the other refused
 // artifacts (graph.json, _dead.json, ...) are always written.
 func emitReport(out, dataDir, repo string, meta contract.Meta, name string, g contract.Graph, nopts notes.Options, opts runOpts) error {
+	// Finalize HERE, not inside writeArtifacts. The graph is passed by value,
+	// so finalizing further down attached the per-run disclosure to that
+	// function's own copy: graph.json carried it and the architext emit below —
+	// built from this scope's graph — did not. A limitation declaring
+	// `evidenced_by: "root_ratio"` then pointed at a field absent from the
+	// document, and architext's referential-integrity check refused the whole
+	// artifact. Every artifact describing one run must agree about that run,
+	// which means one Finalize, above every writer.
+	g = g.Finalize()
+
 	dead, testOnly, err := writeArtifacts(dataDir, meta, g)
 	if err != nil {
 		return err
@@ -428,10 +438,8 @@ func emitReport(out, dataDir, repo string, meta contract.Meta, name string, g co
 // subfolder) and returns the two views so the caller can report on them without
 // re-deriving.
 func writeArtifacts(dataDir string, meta contract.Meta, g contract.Graph) (dead, testOnly contract.Note, err error) {
-	// Attach the per-run disclosure BEFORE deriving the views, so graph.json and
-	// the two row files describe the same run. Derived here rather than in each
-	// backend so the counts mean the same thing for every language.
-	g = g.Finalize()
+	// The caller finalizes; this must not, or it would finalize its own copy and
+	// leave the caller's other writers describing a different run.
 	dead = g.DeadView(meta)
 	testOnly = g.TestOnlyView(meta)
 	if err = contract.WriteGraph(dataDir, g); err != nil {
