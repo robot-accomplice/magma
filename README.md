@@ -139,6 +139,31 @@ computability. Every row is a **candidate**, not a verdict: reflection, `encodin
 interfaces, cgo, `go:linkname`, and entry points invoked from outside the repo all produce
 callers static analysis cannot see. A candidate that survives those rules is worth reading.
 
+### What counts as an entry point
+
+Reachability is only as meaningful as the roots it starts from, so each backend names its own. Go
+uses `main` and `init`; Rust uses a bin's `main` and a lib's publicly reachable API.
+
+For **JavaScript and TypeScript**, roots come from a table of static conventions — a new framework is
+a row in it, never a change to the analyser:
+
+| class | recognised from |
+|---|---|
+| declared package surface | `package.json` → `main`, `module`, `exports`, `bin` |
+| framework conventions | `app/**/{page,layout,route,…}`, `pages/**`, `middleware`, `instrumentation`, SvelteKit `+page`/`+layout`, tooling and Sentry configs |
+| script entries | `package.json` → `scripts` |
+| test entries | `*.test.*`, `*.spec.*`, `__tests__/**`, runner setup files |
+
+Within one of those files, its **exports** are entry points too — a framework calls them, and nothing
+in the repo does. **Everywhere else an export is not a root.** In JavaScript nearly everything is
+exported, so rooting every export would leave almost nothing unreachable and the analysis would
+report no dead code at all — accurate, and useless.
+
+A **bundler-configured** entry point is not recognised, because reading one means executing the
+target's own JavaScript, which magma never does. Module scope is itself a node (`kind: "init"`): an
+import executes the imported module, so it is a real call, and a module reached by nothing is a real
+finding.
+
 ### `fidelity` — what an edge means
 
 Every artifact carries `fidelity`, naming what an edge means for the backend that produced it.
