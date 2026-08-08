@@ -34,13 +34,20 @@ type jsEngine interface {
 }
 
 type jsEnvelope struct {
-	ContractVersion     string       `json:"contract_version"`
-	Computable          *bool        `json:"computable"`
-	Reason              string       `json:"reason"`
-	ExecutedTargetCode  bool         `json:"executed_target_code"`
-	UnresolvedCallSites int          `json:"unresolved_call_sites"`
-	Functions           []jsFunction `json:"functions"`
-	Calls               []jsCall     `json:"calls"`
+	ContractVersion     string `json:"contract_version"`
+	Computable          *bool  `json:"computable"`
+	Reason              string `json:"reason"`
+	ExecutedTargetCode  bool   `json:"executed_target_code"`
+	UnresolvedCallSites int    `json:"unresolved_call_sites"`
+	// RootsByRule counts roots per root rule. It rides the HELPER envelope and
+	// stops here: architext's `disclosure` object sets additionalProperties to
+	// false over exactly five keys, so forwarding a sixth would reject the
+	// whole artifact — the same all-or-nothing failure a pinned enum produced
+	// when magma shipped kind:"init". Held until they ack the field; meanwhile
+	// root_ratio already carries the over-rooting signal.
+	RootsByRule map[string]int `json:"roots_by_rule"`
+	Functions   []jsFunction   `json:"functions"`
+	Calls       []jsCall       `json:"calls"`
 }
 
 type jsFunction struct {

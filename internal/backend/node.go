@@ -87,10 +87,52 @@ func (b nodeBackend) BuildGraph(repo string, meta contract.Meta, progress Progre
 	g.ExecutedTargetCode = env.ExecutedTargetCode
 
 	step("analyzing reachability")
+	markNodeReachable(nodes, edges)
 	assignFan(nodes, edges)
 	g.Nodes = nodes
 	g.Edges = edges
 	return g, nil
+}
+
+// markNodeReachable fills Reachable and ProdReachable by BFS over the edge set.
+//
+// Plan 1 never called this at all: JS nodes carried Reachable=false regardless
+// of the graph, which was invisible only because every node was also root=false
+// and the views refused outright before reading it.
+//
+// Two traversals, matching the Go and Rust backends:
+//
+//   - ProdReachable seeds on production roots alone (Root && !Test).
+//   - Reachable adds the test entry points, which the runner executes and
+//     nothing in the graph calls — exactly as nothing calls `main`.
+//
+// THE TEST SEED IS THE NARROW SIGNAL, and the Rust backend paid for learning
+// the difference. Root && Test is set only by a TEST ROOT RULE — a test file's
+// module scope — never by "this function is declared in a test file", which is
+// what Test alone means. Seeding on Test would make every helper in a test file
+// its own root, trivially reaching itself, so a genuinely dead test helper
+// could never be reported.
+func markNodeReachable(nodes []contract.Node, edges []contract.Edge) {
+	adj := make(map[int][]int, len(nodes))
+	for _, e := range edges {
+		adj[e.From] = append(adj[e.From], e.To)
+	}
+	var allRoots, prodRoots []int
+	for _, n := range nodes {
+		if !n.Root {
+			continue
+		}
+		allRoots = append(allRoots, n.ID)
+		if !n.Test {
+			prodRoots = append(prodRoots, n.ID)
+		}
+	}
+	reachAll := bfs(adj, allRoots)
+	reachProd := bfs(adj, prodRoots)
+	for i := range nodes {
+		nodes[i].Reachable = reachAll[nodes[i].ID]
+		nodes[i].ProdReachable = reachProd[nodes[i].ID]
+	}
 }
 
 // nodeLimitations declares what this backend cannot do.
@@ -110,10 +152,28 @@ func nodeLimitations() contract.Limitations {
 			EvidencedBy: "unresolved_call_sites",
 		},
 		{
-			ID:          "js-roots-not-yet-framework-aware",
+			// Declared from measurement, not from theory: on a real Next.js repo
+			// the residual dead set was 22 of 748, and the bulk of it was
+			// functions defined inside vi.mock factories. Naming the class is
+			// what stops a reader treating those rows as deletion candidates.
+			ID:          "js-test-double-factories",
 			Scope:       contract.ScopeBackend,
 			Attribution: "magma node backend",
-			Description: "package exports, framework file-system routes and script targets are not yet recognised as entry points, so every node reports root:false and the reachability views under-report liveness",
+			Description: "a module replaced by a test-double factory (vi.mock, jest.mock) is bound by the runner at run time, so functions declared inside the factory have no static caller and may report dead",
+			// may-omit-edges, NOT over-approximates-live: this errs toward DEAD.
+			// The runner's call into the factory is the edge that is missing.
+			Effect:      contract.EffectMayOmitEdges,
+			EvidencedBy: "unresolved_call_sites",
+		},
+		{
+			// Narrowed once roots landed. The original wording said entry points
+			// were not recognised AT ALL, which is no longer true and would now
+			// understate the backend — a limitation left stale after the gap
+			// closes is as misleading as one never declared.
+			ID:          "js-roots-static-conventions-only",
+			Scope:       contract.ScopeBackend,
+			Attribution: "magma node backend",
+			Description: "entry points are recognised from package.json (main, module, exports, bin, scripts) and a fixed table of framework path conventions; a bundler-configured entry point is not recognised, because reading one means executing the target's own JavaScript, which magma never does",
 			Effect:      contract.EffectMayOmitNodes,
 			EvidencedBy: "roots",
 		},

@@ -11,15 +11,18 @@ import (
 )
 
 type envelope struct {
-	ContractVersion     string `json:"contract_version"`
-	Computable          *bool  `json:"computable"`
-	Reason              string `json:"reason"`
-	UnresolvedCallSites int    `json:"unresolved_call_sites"`
+	ContractVersion     string         `json:"contract_version"`
+	Computable          *bool          `json:"computable"`
+	Reason              string         `json:"reason"`
+	UnresolvedCallSites int            `json:"unresolved_call_sites"`
+	RootsByRule         map[string]int `json:"roots_by_rule"`
 	Functions           []struct {
 		ID     int    `json:"id"`
 		Symbol string `json:"symbol"`
 		File   string `json:"file"`
 		Line   int    `json:"line"`
+		Root   bool   `json:"root"`
+		Test   bool   `json:"test"`
 	} `json:"functions"`
 	Calls []struct {
 		From *int `json:"from"`

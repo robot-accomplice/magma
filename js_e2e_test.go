@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/robot-accomplice/magma/internal/contract"
 )
 
 // End to end on a real JS repo through the whole pipeline, not just the
@@ -39,6 +41,67 @@ func TestRunJavaScriptRepo(t *testing.T) {
 	}
 	if len(g.Nodes) == 0 {
 		t.Error("no nodes")
+	}
+}
+
+// The whole point of roots: the reachability views must stop refusing, and
+// must be RIGHT.
+//
+// Plan 1 was correct and useless — every node honestly root:false, so
+// `_dead` and `_test-only` refused on every repository. This asserts the two
+// answers a consumer actually acts on, and both directions matter: a false dead
+// is a deletion order, and an empty dead set reads as a clean bill of health.
+func TestJavaScriptReachabilityViewsAnswer(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+	repo := gitRepo(t, map[string]string{
+		"package.json": `{"name":"p","version":"0.0.0","main":"src/index.js"}`,
+		// start -> used. orphan is reached by nothing. testHelper is reached
+		// only from the test file.
+		"src/index.js":    "import { used } from './lib.js';\nexport function start() { used(); }\nstart();\n",
+		"src/lib.js":      "export function used() {}\nexport function orphan() {}\nexport function testHelper() {}\n",
+		"src/lib.test.js": "import { testHelper } from './lib.js';\ntestHelper();\n",
+	})
+	outRoot := t.TempDir()
+	if err := run(repo, "js", outRoot, runOpts{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	g := readGraph(t, filepath.Join(outRoot, "js", ".magma", "graph.json"))
+
+	by := map[string]contract.Node{}
+	for _, n := range g.Nodes {
+		if n.Symbol != "<module>" {
+			by[n.Symbol] = n
+		}
+	}
+
+	// The dead set must be EXACTLY orphan. Asserting the whole set rather than
+	// probing named symbols is deliberate: an earlier version of this test
+	// filtered <module> nodes out and passed while `src/lib.js` — imported by
+	// the package main — was being listed for deletion. A test that looks away
+	// from a class of node cannot see that class go wrong.
+	var dead []string
+	for _, n := range g.Nodes {
+		if n.IsDead() {
+			dead = append(dead, n.File+":"+n.Symbol)
+		}
+	}
+	if len(dead) != 1 || dead[0] != "src/lib.js:orphan" {
+		t.Errorf("dead set = %v, want exactly [src/lib.js:orphan]; anything else is a deletion order for live code", dead)
+	}
+
+	if got, ok := by["orphan"]; !ok || !got.IsDead() {
+		t.Errorf("orphan is reached by nothing and must report dead, got %+v", got)
+	}
+	if got := by["used"]; got.IsDead() {
+		t.Error("used is called from the package main and must NOT report dead — a false dead is a deletion order")
+	}
+	if got := by["start"]; got.IsDead() {
+		t.Error("start is the declared package main's export and must NOT report dead")
+	}
+	if got := by["testHelper"]; !got.IsTestOnly() {
+		t.Errorf("testHelper is reached only from a test file and must report test-only, got %+v", got)
 	}
 }
 
