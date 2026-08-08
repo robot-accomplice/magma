@@ -70,6 +70,11 @@ magma finds it on `PATH`, or at `$MAGMA_RUST_HELPER`. Without it, a Rust repo is
 an install hint rather than analyzed partially — magma returns an honest map or an honest refusal,
 never a degraded one.
 
+Analyzing **JavaScript or TypeScript** needs only `node` on `PATH` (or `$MAGMA_JS_HELPER_NODE`).
+The TypeScript compiler is **embedded in the magma binary** and extracted on first use, so there is
+nothing to install and no npm dependency — deliberately unlike the Rust helper, which cannot ship
+that way. Plain `.js` is analyzed with the same resolution as `.ts`; no `tsconfig.json` is required.
+
 **Rust analysis is slow, and you should expect that.** It loads the workspace twice through
 rust-analyzer (once with `cfg(test)` off, once on) and type-checks every file, because a workspace
 that does not type-check gets a refusal rather than a half-map. Measured on a 1,388-file,
@@ -143,6 +148,7 @@ This is the published vocabulary:
 |---|---|---|
 | `rta` | Go | Static calls exact; dynamic (interface / function-value) calls are the Rapid Type Analysis over-approximation. Calls routed through closures or synthetic wrappers are not yet emitted as node edges — a known, labeled limitation, not a silent gap. |
 | `semantic` | Rust | Edges come from rust-analyzer's name resolution and type inference, so a resolved call lands on the impl rustc would select. Desugared forms (operators, `for`, `await`, format args, `?`, `Drop`) resolve from types rather than syntax and are emitted `dynamic` — real over-approximations, never invented edges. |
+| `semantic` | JavaScript / TypeScript | Edges come from TypeScript's own name resolution and type inference, over `.js` as well as `.ts`: the checker is a JavaScript analyser with an optional type layer, so plain JavaScript is first-class rather than a degraded tier. Call sites with no static target — a computed member call, a dynamic `import()` — are **counted** in `disclosure.unresolved_call_sites`, never silently dropped. |
 
 **Both are real call graphs.** Both over-approximate dynamic dispatch and never invent an edge, so
 every imprecision fails toward "live": a node that either map calls dead is dead conservatively.
@@ -250,12 +256,13 @@ For an audit, still run magma at a frozen HEAD: a clean `sha` is the only one th
 magma exits non-zero and writes a refused (but present) set of files when it cannot stand
 behind a map:
 
-- **Unsupported / unknown language.** Go and Rust are supported; other languages are detected and
-  refused. Support lands one language per minor release — **v0.4.0 is the JavaScript family
-  (TypeScript, Node, Next, React)**. v0.3.0 is a contract release and adds no language: each
-  minor is one substantial change, and language support lands one per minor.
+- **Unsupported / unknown language.** Go, Rust and the JavaScript family are supported; other
+  languages are detected and refused. Support lands one language per minor release, and each minor
+  is one substantial change — v0.3.0 was a contract release and added none.
 - **Rust helper not installed.** A Rust repo is refused, with the install command, when
   `magma-rust-helper` is on neither `PATH` nor `$MAGMA_RUST_HELPER`.
+- **`node` not found.** A JavaScript or TypeScript repo is refused, naming the runtime and the
+  environment variable, when `node` is on neither `PATH` nor `$MAGMA_JS_HELPER_NODE`.
 - **No production `main` in scope.** A library or a single-package scope has no external-caller
   root, so reachability would be almost all false positives. `graph.json` is still emitted
   (test-rooted); `_dead` and `_test-only` refuse.

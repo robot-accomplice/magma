@@ -15,7 +15,7 @@ type Lang string
 const (
 	Go      Lang = "go"
 	Rust    Lang = "rust"
-	Node    Lang = "node" // Node / React-TS / Next — one analyzer (knip) covers them
+	Node    Lang = "node" // Node / React-TS / Next — one backend covers .js, .ts, .tsx
 	Kotlin  Lang = "kotlin"
 	Java    Lang = "java"
 	Unknown Lang = "none"
