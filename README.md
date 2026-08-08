@@ -113,9 +113,23 @@ written alongside it, hidden under `<vault-path>/<folder-name>/.magma/`:
 | `.magma/graph.json` | `codemap-graph/1` | **the primary artifact** — every function/method (node) and call (edge) |
 | `.magma/_dead.json` | `codemap-rows/1` | derived view: source reachable from no root (production-dead) |
 | `.magma/_test-only.json` | `codemap-rows/1` | derived view: production code reached **only** through tests |
+| `.magma/_interfaces.json` | `codemap-rows/1` | the module's own interfaces with **exactly one** module-local implementor |
 | `.magma/manifest.json` | — | the sorted list of markdown paths this run wrote, used to reconcile stale notes on the next run and to gate freshness |
 
-The two views are **derived from the graph**, so they can never disagree with it about
+`_interfaces.json` is the odd one out, and deliberately so. Implementing an interface is a
+**type-level** relation with no call site, so unlike the other two it cannot be derived from the
+graph — the graph knows what calls what, never what implements what. Four things are excluded, each
+because including them would make the count mean something else: empty interfaces (every type
+satisfies them), generic constraints (a type set, not a method set), out-of-module types on either
+side (an interface also implemented by a dependency is not single-implementation), and **zero**
+implementors — a dead abstraction is a different finding with a different remedy, and a consumer
+treats every row in a file identically.
+
+A backend that cannot answer emits an explicit refusal rather than an empty file: *absent* and
+*"not implemented for this language"* are different claims, and only the second is actionable. An
+analysed module with no such interfaces reports `[]`, not a refusal.
+
+The dead and test-only views are **derived from the graph**, so they can never disagree with it about
 computability. Every row is a **candidate**, not a verdict: reflection, `encoding/json`
 interfaces, cgo, `go:linkname`, and entry points invoked from outside the repo all produce
 callers static analysis cannot see. A candidate that survives those rules is worth reading.
