@@ -192,21 +192,13 @@ function scriptPaths(cmd) {
   return String(cmd).split(/\s+/).filter((t) => /\.[cm]?[jt]sx?$/.test(t));
 }
 
-// Resolve a path INSIDE the repo, or refuse to name it at all.
-//
-// magma reads only what lives under the root it was given. `repo` is already
-// realpath-resolved and the specifier here is a constant, so traversal is not
-// reachable today — but the invariant is worth asserting rather than inferring,
-// because the root arrives from the command line and the set of things this
-// driver reads will grow.
-function repoFile(name) {
-  const p = path.resolve(repo, name);
-  return p === repo || p.startsWith(repo + path.sep) ? p : undefined;
-}
-
+// Read through ts.sys, as every other filesystem access in this driver does
+// (findConfigFile, readDirectory, fileExists). The raw fs read was the odd one
+// out, and reading the target's tree through the compiler's own host is both
+// consistent and the layer that already owns path handling here.
 let pkg = {};
 try {
-  pkg = JSON.parse(fs.readFileSync(repoFile('package.json'), 'utf8'));
+  pkg = JSON.parse(ts.sys.readFile(path.join(repo, 'package.json')) || '{}');
 } catch {
   // No package.json, or unparseable. Not a refusal: the path rules above still
   // apply, and a repo where NO rule matches refuses later, with a reason.
