@@ -668,7 +668,14 @@ func gitRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 	repo := t.TempDir()
 	for name, body := range files {
-		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o644); err != nil {
+		path := filepath.Join(repo, name)
+		// Nested keys ("src/index.js") describe the layout of nearly every real
+		// JS project, so the helper creates the directory rather than making
+		// each caller do it. A flat key resolves to repo itself, which exists.
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
