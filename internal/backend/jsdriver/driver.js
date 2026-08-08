@@ -6,7 +6,8 @@
 // Go and Rust backends so magma can drive all three identically.
 'use strict';
 
-const path = require('path');
+const path = require('node:path');
+const fs = require('node:fs');
 const ts = require(path.join(__dirname, 'typescript.js'));
 
 const EXIT_USAGE = 2;
@@ -31,7 +32,7 @@ if (!repoArg) {
 // Resolved once, and every later path derives from it. The Rust helper learned
 // this the hard way: `/tmp` resolves to `/private/tmp` on macOS, so an
 // unresolved root makes every prefix comparison silently miss.
-const repo = require('fs').realpathSync(repoArg);
+const repo = fs.realpathSync(repoArg);
 
 progress('discovering sources');
 // Use TypeScript's own config discovery so magma analyses what the project
@@ -95,6 +96,15 @@ function declName(node) {
     return p.name.getText();
   }
   return '<anonymous>';
+}
+
+// The graph id for a declaration, if the graph knows one. A symbol's
+// declaration for `const Page = () => {}` is the VARIABLE, whose initializer is
+// the function node actually collected — so both have to be tried.
+function idOfDeclaration(d) {
+  if (!d) return undefined;
+  if (idByNode.has(d)) return idByNode.get(d);
+  return d.initializer ? idByNode.get(d.initializer) : undefined;
 }
 
 // The symbol a call site can be resolved back to. For a named declaration that
@@ -184,7 +194,7 @@ function scriptPaths(cmd) {
 
 let pkg = {};
 try {
-  pkg = JSON.parse(require('fs').readFileSync(path.join(repo, 'package.json'), 'utf8'));
+  pkg = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'));
 } catch {
   // No package.json, or unparseable. Not a refusal: the path rules above still
   // apply, and a repo where NO rule matches refuses later, with a reason.
@@ -338,10 +348,7 @@ for (const sf of program.getSourceFiles()) {
   for (const ex of checker.getExportsOfModule(moduleSym)) {
     const target = (ex.flags & ts.SymbolFlags.Alias) ? checker.getAliasedSymbol(ex) : ex;
     for (const d of target.declarations || []) {
-      // The declaration for `const Page = () => {}` is the variable, whose
-      // initializer is the function node the graph actually knows.
-      const id = idByNode.has(d) ? idByNode.get(d)
-               : (d.initializer ? idByNode.get(d.initializer) : undefined);
+      const id = idOfDeclaration(d);
       if (id !== undefined && !functions[id].root) {
         functions[id].root = true;
         countRoot(rule);
@@ -397,6 +404,53 @@ function enclosingId(node, sf) {
 //
 // An identifier that does not resolve to a function we know contributes
 // nothing, so this widens edges only where a real handoff exists.
+
+// The graph id a symbol resolves to, following import aliases.
+function idOfSymbol(sym) {
+  if (sym && (sym.flags & ts.SymbolFlags.Alias)) sym = checker.getAliasedSymbol(sym);
+  return sym ? idBySymbol.get(sym) : undefined;
+}
+
+// The operators that pass one of their operands through unchanged.
+const PASSTHROUGH_OPERATORS = new Set([
+  ts.SyntaxKind.AmpersandAmpersandToken,
+  ts.SyntaxKind.BarBarToken,
+  ts.SyntaxKind.QuestionQuestionToken,
+]);
+
+// Wrappers that choose or merely re-type the value being handed over. All of
+// them still hand it over, so stopping at the wrapper loses the edge:
+// `onClick={isConnected ? handleSwap : onConnect}` reported handleSwap DEAD on
+// a real repo — the primary action of a swap screen, marked for deletion.
+function passthroughOperands(expr) {
+  if (ts.isConditionalExpression(expr)) return [expr.whenTrue, expr.whenFalse];
+  if (ts.isBinaryExpression(expr) && PASSTHROUGH_OPERATORS.has(expr.operatorToken.kind)) {
+    return [expr.left, expr.right];
+  }
+  if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) ||
+      ts.isNonNullExpression(expr) || ts.isSatisfiesExpression(expr)) {
+    return [expr.expression];
+  }
+  return [];
+}
+
+// The functions an object literal hands over, one property at a time.
+function objectLiteralHandoffs(expr, out, depth) {
+  for (const p of expr.properties) {
+    if (ts.isPropertyAssignment(p)) {
+      handedOff(p.initializer, out, depth + 1);
+    } else if (ts.isMethodDeclaration(p) && idByNode.has(p)) {
+      out.push(idByNode.get(p));
+    } else if (ts.isShorthandPropertyAssignment(p)) {
+      // `{ onDone }` needs its own accessor: getSymbolAtLocation on the
+      // identifier yields the PROPERTY symbol, not the value it stands for,
+      // so resolving it like a normal identifier silently finds nothing.
+      const id = idOfSymbol(checker.getShorthandAssignmentValueSymbol(p));
+      if (id !== undefined) out.push(id);
+    }
+  }
+}
+
 function handedOff(expr, out, depth) {
   if (!expr || depth > 3) return;
   if (isFunctionLike(expr)) {
@@ -404,51 +458,19 @@ function handedOff(expr, out, depth) {
     return;
   }
   if (ts.isIdentifier(expr) || ts.isPropertyAccessExpression(expr)) {
-    let sym = checker.getSymbolAtLocation(expr);
-    if (sym && (sym.flags & ts.SymbolFlags.Alias)) sym = checker.getAliasedSymbol(sym);
-    if (sym && idBySymbol.has(sym)) out.push(idBySymbol.get(sym));
+    const id = idOfSymbol(checker.getSymbolAtLocation(expr));
+    if (id !== undefined) out.push(id);
     return;
   }
   if (ts.isObjectLiteralExpression(expr)) {
-    for (const p of expr.properties) {
-      if (ts.isPropertyAssignment(p)) handedOff(p.initializer, out, depth + 1);
-      else if (ts.isMethodDeclaration(p) && idByNode.has(p)) out.push(idByNode.get(p));
-      else if (ts.isShorthandPropertyAssignment(p)) {
-        // `{ onDone }` needs its own accessor: getSymbolAtLocation on the
-        // identifier yields the PROPERTY symbol, not the value it stands for,
-        // so resolving it like a normal identifier silently finds nothing.
-        let sym = checker.getShorthandAssignmentValueSymbol(p);
-        if (sym && (sym.flags & ts.SymbolFlags.Alias)) sym = checker.getAliasedSymbol(sym);
-        if (sym && idBySymbol.has(sym)) out.push(idBySymbol.get(sym));
-      }
-    }
+    objectLiteralHandoffs(expr, out, depth);
     return;
   }
   if (ts.isArrayLiteralExpression(expr)) {
     for (const el of expr.elements) handedOff(el, out, depth + 1);
     return;
   }
-  // Wrappers that choose or merely re-type the value being handed over. All of
-  // these still hand it over, so stopping at the wrapper loses the edge:
-  // `onClick={isConnected ? handleSwap : onConnect}` reported handleSwap DEAD
-  // on a real repo — the primary action of a swap screen, marked for deletion.
-  if (ts.isConditionalExpression(expr)) {
-    handedOff(expr.whenTrue, out, depth + 1);
-    handedOff(expr.whenFalse, out, depth + 1);
-    return;
-  }
-  if (ts.isBinaryExpression(expr) &&
-      (expr.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
-       expr.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
-       expr.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)) {
-    handedOff(expr.left, out, depth + 1);
-    handedOff(expr.right, out, depth + 1);
-    return;
-  }
-  if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) ||
-      ts.isNonNullExpression(expr) || ts.isSatisfiesExpression(expr)) {
-    handedOff(expr.expression, out, depth + 1);
-  }
+  for (const operand of passthroughOperands(expr)) handedOff(operand, out, depth + 1);
 }
 
 // The value positions themselves: a call's arguments, a JSX attribute, and a
@@ -466,51 +488,60 @@ function valuePositions(node) {
   return [];
 }
 
+// The declaration a call site targets. A JSX tag resolves through the checker
+// so a renamed import lands on the right declaration; a lowercase intrinsic
+// (`<div>`) resolves to nothing local and is simply not an edge.
+function calleeDeclaration(node, isJsx) {
+  if (!isJsx) {
+    const sig = checker.getResolvedSignature(node);
+    return sig?.declaration;
+  }
+  let sym = checker.getSymbolAtLocation(node.tagName);
+  if (sym && (sym.flags & ts.SymbolFlags.Alias)) sym = checker.getAliasedSymbol(sym);
+  const d = sym?.declarations?.[0];
+  if (!d) return undefined;
+  return idByNode.has(d) ? d : (d.initializer || d);
+}
+
+// Record every function this node hands to something else.
+function recordHandoffs(node, sf) {
+  const positions = valuePositions(node);
+  if (positions.length === 0) return;
+  const targets = [];
+  for (const p of positions) handedOff(p, targets, 0);
+  if (targets.length === 0) return;
+  const owner = enclosingId(node, sf);
+  if (owner === undefined) return;
+  const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
+  for (const to of targets) {
+    if (to === owner) continue;
+    calls.push({
+      from: owner,
+      to,
+      site_file: rel(sf.fileName),
+      site_line: line + 1,
+      kind: 'static',
+    });
+  }
+}
+
 for (const sf of program.getSourceFiles()) {
   if (!local(sf)) continue;
   const visit = (node) => {
-    const positions = valuePositions(node);
-    if (positions.length) {
-      const targets = [];
-      for (const p of positions) handedOff(p, targets, 0);
-      const owner = enclosingId(node, sf);
-      const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
-      for (const to of targets) {
-        if (owner === undefined || to === owner) continue;
-        calls.push({
-          from: owner,
-          to,
-          site_file: rel(sf.fileName),
-          site_line: line + 1,
-          kind: 'static',
-        });
-      }
-    }
+    recordHandoffs(node, sf);
     // A JSX element IS a call: `<Foo />` invokes Foo. Without this every React
     // component has no incoming edge and reports dead — the direct analogue of
     // the Rust family-A defect, where Bevy systems passed as values had no
-    // syntactic call site. The tag name is resolved through the checker, so a
-    // renamed import lands on the right declaration; a lowercase intrinsic
-    // (`<div>`) resolves to nothing local and is simply not an edge.
+    // syntactic call site.
     const isJsx = ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node);
     if (ts.isCallExpression(node) || ts.isNewExpression(node) || isJsx) {
       const from = enclosingId(node, sf);
-      let decl;
-      if (isJsx) {
-        let sym = checker.getSymbolAtLocation(node.tagName);
-        if (sym && (sym.flags & ts.SymbolFlags.Alias)) sym = checker.getAliasedSymbol(sym);
-        const d = sym && sym.declarations && sym.declarations[0];
-        decl = d && (idByNode.has(d) ? d : (d.initializer || d));
-      } else {
-        const sig = checker.getResolvedSignature(node);
-        decl = sig && sig.declaration;
-      }
+      const decl = calleeDeclaration(node, isJsx);
       let to;
       if (decl && idByNode.has(decl)) {
         to = idByNode.get(decl);
       } else if (decl) {
-        const sym = declSymbol(decl);
-        if (sym && idBySymbol.has(sym)) to = idBySymbol.get(sym);
+        to = idOfSymbol(declSymbol(decl));
       }
       if (to !== undefined) {
         const { line } = sf.getLineAndCharacterOfPosition(node.getStart());

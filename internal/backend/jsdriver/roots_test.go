@@ -22,6 +22,26 @@ func write(t *testing.T, files map[string]string) string {
 	return repo
 }
 
+// hasIncomingEdge reports whether anything in the graph calls symbol.
+func hasIncomingEdge(t *testing.T, env envelope, symbol string) bool {
+	t.Helper()
+	target := -1
+	for _, f := range env.Functions {
+		if f.Symbol == symbol {
+			target = f.ID
+		}
+	}
+	if target < 0 {
+		t.Fatalf("%s was not collected: %+v", symbol, env.Functions)
+	}
+	for _, c := range env.Calls {
+		if c.To != nil && *c.To == target {
+			return true
+		}
+	}
+	return false
+}
+
 func rootsOf(env envelope) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range env.Functions {
@@ -286,22 +306,9 @@ func TestFunctionsHandedOffAsValuesAreReachable(t *testing.T) {
 				"index.js":     tc.body,
 			})
 			env := run(t, repo)
-
-			target := -1
-			for _, f := range env.Functions {
-				if f.Symbol == tc.symbol {
-					target = f.ID
-				}
+			if !hasIncomingEdge(t, env, tc.symbol) {
+				t.Errorf("no edge into %s; it is handed off as a value and would report DEAD — a deletion order for live code", tc.symbol)
 			}
-			if target < 0 {
-				t.Fatalf("%s was not collected: %+v", tc.symbol, env.Functions)
-			}
-			for _, c := range env.Calls {
-				if c.To != nil && *c.To == target {
-					return
-				}
-			}
-			t.Errorf("no edge into %s; it is handed off as a value and would report DEAD — a deletion order for live code", tc.symbol)
 		})
 	}
 }
