@@ -7,6 +7,8 @@
 package backend
 
 import (
+	"sort"
+
 	"github.com/robot-accomplice/magma/internal/contract"
 	"github.com/robot-accomplice/magma/internal/detect"
 )
@@ -37,4 +39,21 @@ func register(l detect.Lang, b Backend) { registry[l] = b }
 func For(l detect.Lang) (Backend, bool) {
 	b, ok := registry[l]
 	return b, ok
+}
+
+// Supported names the languages a backend is actually registered for, sorted so
+// the output is deterministic.
+//
+// Derived from the registry rather than written down, because the hand-written
+// version went stale exactly as you would expect: the CLI help AND the refusal
+// reason both said "supports Go" through two releases that supported Rust, and
+// the refusal reason is machine-readable text a consumer reads. Registering a
+// backend is now the only step needed to keep both honest.
+func Supported() []string {
+	out := make([]string, 0, len(registry))
+	for l := range registry {
+		out = append(out, string(l))
+	}
+	sort.Strings(out)
+	return out
 }
