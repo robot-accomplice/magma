@@ -106,6 +106,11 @@ func (goBackend) BuildGraph(repo string, meta contract.Meta, progress Progress) 
 
 	g.Nodes = nodes
 	g.Edges = edges
+	// Type-level, so it cannot be derived from the graph above: nodes and edges
+	// record what calls what, never what implements what. The type information
+	// is already loaded and was previously discarded.
+	step("collecting interfaces")
+	g.Interfaces = collectInterfaces(repo, modPath, withTests.initial)
 	return g, nil
 }
 

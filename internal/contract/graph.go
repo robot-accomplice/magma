@@ -132,8 +132,44 @@ type Graph struct {
 	// because there is no graph to measure and a zeroed count block would read
 	// as "measured, and everything was zero".
 	Disclosure *Disclosure `json:"disclosure,omitempty"`
-	Nodes      []Node      `json:"nodes"`
-	Edges      []Edge      `json:"edges"`
+	// Interfaces are the module's own interfaces with exactly ONE module-local
+	// implementor — the seed for the audit gate's family E. Type-level facts, so
+	// unlike the dead/test-only views these cannot be derived from nodes and
+	// edges: the graph knows what calls what, not what implements what. A
+	// backend that cannot answer leaves this nil.
+	//
+	// `omitempty`, and deliberately NOT carried into the architext emit: it is
+	// not part of the contract they validate, and omitting it keeps every Rust
+	// artifact byte-identical.
+	Interfaces []Row  `json:"interfaces,omitempty"`
+	Nodes      []Node `json:"nodes"`
+	Edges      []Edge `json:"edges"`
+}
+
+// InterfacesView derives the _interfaces note: the module's own interfaces with
+// exactly one module-local implementor.
+//
+// Reuses Row and `codemap-rows/1` unchanged. A row wanting to name its
+// implementor was considered and rejected: adding a field means bumping the
+// contract string, and the consuming gate fails CLOSED on an unknown one, which
+// reads to it as a total outage. The implementor is discoverable from the graph,
+// so the extra field would buy convenience at the cost of an outage.
+//
+// Unlike DeadView and TestOnlyView this does NOT require a production root:
+// "how many types implement this interface" is a fact about declarations, not
+// about reachability, so a library with no main can still answer it honestly.
+// It still mirrors the graph's computability — a refused graph cannot support
+// any claim about the module's types.
+func (g Graph) InterfacesView(m Meta) Note {
+	m.Fidelity = g.Fidelity
+	m.Limitations = g.Limitations
+	if !g.Computable {
+		return m.Refused(g.NotComputableReason)
+	}
+	if g.Interfaces == nil {
+		return m.Refused("interface analysis not implemented for this language")
+	}
+	return m.Computed(append([]Row(nil), g.Interfaces...))
 }
 
 // Finalize attaches the per-run Disclosure. It is derived from the finished

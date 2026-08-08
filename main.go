@@ -448,6 +448,14 @@ func writeArtifacts(dataDir string, meta contract.Meta, g contract.Graph) (dead,
 	if err = contract.Write(dataDir, "_dead", dead); err != nil {
 		return dead, testOnly, err
 	}
+	// Family E's seed. Always written, including a refusal from a backend that
+	// cannot answer: the audit gate treats a MISSING row file as "this family
+	// did not run", which is correct, but an explicit refusal says WHY. A file
+	// that is absent and a file that says "not implemented for this language"
+	// are different claims, and only the second is actionable.
+	if err = contract.Write(dataDir, "_interfaces", g.InterfacesView(meta)); err != nil {
+		return dead, testOnly, err
+	}
 	err = contract.Write(dataDir, "_test-only", testOnly)
 	return dead, testOnly, err
 }
