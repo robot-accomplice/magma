@@ -297,6 +297,13 @@ Run through this **before** pushing the tag; a tag is public the moment it lands
   and it fails *in public*, after the tag exists.
 - **Remember `release.yml` runs the Go gates only.** The Rust oracle gate lives in `ci.yml`, so the
   green `develop → main` PR is the last point Rust correctness is actually checked — not the tag.
+- **Reinstall the local binary** (`go install .`) once the tag is pushed. Shipping a release
+  otherwise leaves the person who shipped it running the previous one, and every map they produce
+  is stamped by a magma that no longer exists. This is not hypothetical: the installed binary sat
+  at v0.2.0 while v0.3.0 was designed, built, reviewed and released, so every map made on that
+  machine silently lacked `limitations`, `disclosure`, and the full sha. The `generator` field
+  named the stale build in every one of those artifacts and nobody read it — a control that must
+  be remembered is a note, not a control.
 - **Check the release artifacts after publishing**, not just the workflow's exit status: the run can
   succeed while the Release is a draft or missing a target.
 
