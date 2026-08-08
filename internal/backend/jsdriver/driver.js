@@ -192,9 +192,21 @@ function scriptPaths(cmd) {
   return String(cmd).split(/\s+/).filter((t) => /\.[cm]?[jt]sx?$/.test(t));
 }
 
+// Resolve a path INSIDE the repo, or refuse to name it at all.
+//
+// magma reads only what lives under the root it was given. `repo` is already
+// realpath-resolved and the specifier here is a constant, so traversal is not
+// reachable today — but the invariant is worth asserting rather than inferring,
+// because the root arrives from the command line and the set of things this
+// driver reads will grow.
+function repoFile(name) {
+  const p = path.resolve(repo, name);
+  return p === repo || p.startsWith(repo + path.sep) ? p : undefined;
+}
+
 let pkg = {};
 try {
-  pkg = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'));
+  pkg = JSON.parse(fs.readFileSync(repoFile('package.json'), 'utf8'));
 } catch {
   // No package.json, or unparseable. Not a refusal: the path rules above still
   // apply, and a repo where NO rule matches refuses later, with a reason.
