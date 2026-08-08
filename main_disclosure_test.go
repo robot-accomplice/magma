@@ -4,14 +4,25 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/robot-accomplice/magma/internal/contract"
 )
 
-func TestVersionIs030(t *testing.T) {
-	if version != "0.3.0" {
-		t.Fatalf("version = %q, want 0.3.0 — the release workflow hard-fails on a tag/binary mismatch, in public, after the tag exists", version)
+// version must be bare semver, because release.yml compares it to the tag with
+// the leading "v" stripped and hard-fails on a mismatch — in public, after the
+// tag already exists.
+//
+// Deliberately a SHAPE check, not an equality check against a literal. This
+// test previously pinned "0.3.0" and so had to be hand-edited every release:
+// the same recurring-manual-step smell as the hardcoded supported-language
+// list and the README's literal tag example. The real tag-vs-binary comparison
+// lives in release.yml and cannot go stale; duplicating it here with a
+// hardcoded string was strictly worse than checking the property.
+func TestVersionIsBareSemver(t *testing.T) {
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(version) {
+		t.Fatalf("version = %q, want bare semver like 1.2.3 (no leading v, no suffix)", version)
 	}
 }
 
@@ -29,7 +40,7 @@ func TestWriteArtifactsCarriesDisclosureThrough(t *testing.T) {
 		Fidelity:   "rta",
 		Nodes:      []contract.Node{{ID: 1, Root: true}, {ID: 2}},
 	}.Finalize() // the caller's job, as in emitReport
-	if _, _, err := writeArtifacts(dir, contract.Meta{Generator: "magma/0.3.0"}, g); err != nil {
+	if _, _, err := writeArtifacts(dir, contract.Meta{Generator: "magma/0.3.1"}, g); err != nil {
 		t.Fatalf("writeArtifacts: %v", err)
 	}
 

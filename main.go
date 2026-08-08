@@ -41,7 +41,7 @@ import (
 )
 
 // version tracks language support, not the data contract: 0.1.x == complete Go.
-const version = "0.3.0"
+const version = "0.3.1"
 
 func main() {
 	opt := parseArgs(os.Args[1:])
