@@ -100,11 +100,45 @@ progress('collecting declarations');
 const functions = [];
 const idBySymbol = new Map();
 const idByNode = new Map();
+const moduleIdByFile = new Map();
 
 for (const sf of program.getSourceFiles()) {
   if (!local(sf)) continue;
   const isTest = /\.(test|spec)\.[cm]?[jt]sx?$/.test(sf.fileName) ||
                  /(^|\/)__tests__\//.test(rel(sf.fileName));
+
+  // A node for the module's own top level, BEFORE its declarations so it owns
+  // the lowest id in the file.
+  //
+  // Module scope is executable code in JavaScript — `main()` at the foot of an
+  // index.js is a real call from a real place — but it is not inside any
+  // function, so it had no node to be attributed to. The previous sentinel
+  // (-1) was not merely inelegant: it left the graph, and `ids[-1]` on a
+  // map[int]string in the architext emit is a zero-value read, so it arrived
+  // downstream as `"from": ""`. That fails architext's id pattern and rejects
+  // the whole artifact, and where the two endpoints' module slugs differed it
+  // dereferenced a nil module and PANICKED the emit outright.
+  //
+  // `init` is the kind the Rust backend already uses for synthesized
+  // initializers, and it is already in the consumer's enum, so this needs no
+  // contract change.
+  const moduleID = functions.length;
+  functions.push({
+    id: moduleID,
+    symbol: '<module>',
+    pkg: path.dirname(rel(sf.fileName)),
+    file: rel(sf.fileName),
+    line: 1,
+    kind: 'init',
+    // Module scope is not an export, and rooting is decided by the root rules
+    // below — never by a node merely existing.
+    exported: false,
+    test: isTest,
+    root: false,
+    generated: false,
+  });
+  moduleIdByFile.set(sf.fileName, moduleID);
+
   const visit = (node) => {
     if (isFunctionLike(node)) {
       const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
@@ -141,18 +175,23 @@ let unresolved = 0;
 // The function a call site sits inside. Walks to the nearest enclosing
 // function-like node rather than matching on names, so calls written inside an
 // anonymous callback are still attributed to it.
-function enclosingId(node) {
+//
+// Falls back to the file's module node, never to a sentinel: a call at module
+// scope has a real origin, and EVERY EMITTED EDGE MUST NAME A DECLARED NODE.
+// That invariant is the consumer's, not a stylistic preference — architext
+// rejects an artifact whose call references an id it cannot resolve.
+function enclosingId(node, sf) {
   for (let p = node.parent; p; p = p.parent) {
     if (idByNode.has(p)) return idByNode.get(p);
   }
-  return -1;
+  return moduleIdByFile.get(sf.fileName);
 }
 
 for (const sf of program.getSourceFiles()) {
   if (!local(sf)) continue;
   const visit = (node) => {
     if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
-      const from = enclosingId(node);
+      const from = enclosingId(node, sf);
       const sig = checker.getResolvedSignature(node);
       const decl = sig && sig.declaration;
       let to;
